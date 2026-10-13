@@ -14,6 +14,8 @@ MODULE_SIGNING_DIR="/var/lib/damx/secureboot"
 MODULE_SIGNING_KEY="${MODULE_SIGNING_DIR}/DAMX-MOK.priv"
 MODULE_SIGNING_CERT="${MODULE_SIGNING_DIR}/DAMX-MOK.der"
 MODULE_SIGNING_REQUIRED=false
+LINUWU_SENSE_DKMS_NAME="linuwu-sense"
+DKMS_SIGNING_CONF="/etc/dkms/framework.conf.d/damx.conf"
 
 # Legacy paths for cleanup (uppercase naming convention)
 LEGACY_INSTALL_DIR="/opt/DAMX"
@@ -141,6 +143,8 @@ comprehensive_cleanup() {
     fi
     cd ..
   fi
+  unregister_linuwu_sense_dkms
+  rm -f "$DKMS_SIGNING_CONF"
 
   systemctl daemon-reload
 
@@ -412,6 +416,156 @@ install_build_deps() {
   fi
 }
 
+# Linux 7.2 removed strncpy(). Linuwu-Sense's sysfs store handlers copy a
+# bounded prefix of the input and NUL-terminate it themselves, so memcpy()
+# keeps their behaviour. strscpy(dst, buf, len) would not: it drops the last
+# character, turning a "100,100" fan_speed write into "100,10".
+patch_linuwu_sense_sources() {
+  local source_file="src/linuwu_sense.c"
+
+  if [ ! -f "$source_file" ]; then
+    echo -e "${RED}Error: ${source_file} not found.${NC}"
+    return 1
+  fi
+
+  if ! grep -q '\bstrncpy(' "$source_file"; then
+    return 0
+  fi
+
+  echo -e "${YELLOW}Patching Linuwu-Sense for kernels without strncpy()...${NC}"
+  sed -i -E 's/\bstrncpy\(([A-Za-z_][A-Za-z0-9_]*), *buf, *len\);/memcpy(\1, buf, len);/' "$source_file"
+  if ! grep -q '#include <linux/string.h>' "$source_file"; then
+    sed -i -E '0,/#include <linux\/kernel\.h>/s//&\n#include <linux\/string.h>/' "$source_file"
+  fi
+
+  if grep -q '\bstrncpy(' "$source_file"; then
+    echo -e "${RED}Error: Could not replace every strncpy() call in ${source_file}.${NC}"
+    return 1
+  fi
+}
+
+install_dkms_deps() {
+  if command -v pacman &> /dev/null; then
+    pacman -S --needed --noconfirm dkms
+  elif command -v apt-get &> /dev/null; then
+    apt-get update && apt-get install -y dkms
+  elif command -v dnf &> /dev/null; then
+    dnf install -y dkms
+  elif command -v yum &> /dev/null; then
+    yum install -y dkms
+  elif command -v zypper &> /dev/null; then
+    zypper install -y dkms
+  else
+    return 1
+  fi
+}
+
+# DKMS falls back to its own unenrolled key when nothing is configured, so
+# point it at the DAMX MOK unless the system already has a DKMS signing setup.
+configure_dkms_signing() {
+  if [ "$MODULE_SIGNING_REQUIRED" != true ]; then
+    return 0
+  fi
+
+  if grep -qsE '^[[:space:]]*mok_signing_key=' /etc/dkms/framework.conf /etc/dkms/framework.conf.d/*.conf ||
+     [ -f /var/lib/dkms/mok.key ]; then
+    return 0
+  fi
+
+  install -d /etc/dkms/framework.conf.d || return 1
+  cat > "$DKMS_SIGNING_CONF" << EOL
+mok_signing_key="${MODULE_SIGNING_KEY}"
+mok_certificate="${MODULE_SIGNING_CERT}"
+EOL
+}
+
+unregister_linuwu_sense_dkms() {
+  local version
+
+  if command -v dkms &> /dev/null; then
+    for version in /var/lib/dkms/${LINUWU_SENSE_DKMS_NAME}/*/; do
+      [ -d "$version" ] || continue
+      version=$(basename "$version")
+      case "$version" in
+        kernel-*|original_module) continue ;;
+      esac
+      dkms remove "${LINUWU_SENSE_DKMS_NAME}/${version}" --all > /dev/null 2>&1 || true
+    done
+  fi
+
+  rm -rf "/usr/src/${LINUWU_SENSE_DKMS_NAME}-"*
+}
+
+# Register the patched driver sources with DKMS so the module is rebuilt
+# automatically for every new kernel. Without it the driver disappears after
+# each kernel update. Must be called from the Linuwu-Sense source directory
+# after `make install` has succeeded.
+register_linuwu_sense_dkms() {
+  local kernel_release
+  local version
+  local dkms_src
+  local installed_ko
+  local backup_ko
+
+  if ! command -v dkms &> /dev/null; then
+    echo -e "${YELLOW}Installing DKMS for automatic driver rebuilds...${NC}"
+    if ! install_dkms_deps || ! command -v dkms &> /dev/null; then
+      return 1
+    fi
+  fi
+
+  configure_dkms_signing || return 1
+
+  kernel_release=$(uname -r)
+  version=$(sed -n -E 's/^[[:space:]]*#define[[:space:]]+DRIVER_VERSION[[:space:]]+"([^"]+)".*/\1/p' src/linuwu_sense.c | head -n 1)
+  version=${version:-1.0}
+  dkms_src="/usr/src/${LINUWU_SENSE_DKMS_NAME}-${version}"
+
+  echo -e "${YELLOW}Registering Linuwu-Sense ${version} with DKMS...${NC}"
+  unregister_linuwu_sense_dkms
+
+  install -d "${dkms_src}/src" || return 1
+  cp src/*.c "${dkms_src}/src/" || return 1
+  cp src/*.h "${dkms_src}/src/" 2> /dev/null || true
+  echo 'obj-m := src/linuwu_sense.o' > "${dkms_src}/Kbuild"
+  cat > "${dkms_src}/dkms.conf" << EOL
+PACKAGE_NAME="${LINUWU_SENSE_DKMS_NAME}"
+PACKAGE_VERSION="${version}"
+BUILT_MODULE_NAME[0]="linuwu_sense"
+BUILT_MODULE_LOCATION[0]="src"
+DEST_MODULE_LOCATION[0]="/kernel/drivers/platform/x86"
+MAKE[0]="make -C \${kernel_source_dir} M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build modules"
+AUTOINSTALL="yes"
+EOL
+
+  if ! dkms add "${LINUWU_SENSE_DKMS_NAME}/${version}" ||
+     ! dkms build "${LINUWU_SENSE_DKMS_NAME}/${version}" -k "$kernel_release"; then
+    unregister_linuwu_sense_dkms
+    return 1
+  fi
+
+  # `make install` left an unversioned copy in the kernel tree, and DKMS
+  # refuses to install over an identical module. Keep it as a fallback until
+  # the DKMS copy is in place.
+  installed_ko="/lib/modules/${kernel_release}/kernel/drivers/platform/x86/linuwu_sense.ko"
+  backup_ko="${installed_ko}.damx-backup"
+  if [ -f "$installed_ko" ]; then
+    mv -f "$installed_ko" "$backup_ko" || return 1
+  fi
+
+  if ! dkms install "${LINUWU_SENSE_DKMS_NAME}/${version}" -k "$kernel_release"; then
+    if [ -f "$backup_ko" ]; then
+      mv -f "$backup_ko" "$installed_ko"
+      depmod -a "$kernel_release"
+    fi
+    return 1
+  fi
+
+  rm -f "$backup_ko"
+  echo -e "${GREEN}Linuwu-Sense will be rebuilt automatically on kernel updates.${NC}"
+  return 0
+}
+
 clone_and_install_linuwu_sense() {
   local build_args=()
   local signing_status
@@ -425,6 +579,12 @@ clone_and_install_linuwu_sense() {
   fi
 
   cd Linuwu-Sense || return 1
+
+  if ! patch_linuwu_sense_sources; then
+    cd .. || return 1
+    pause
+    return 1
+  fi
 
   # Install build dependencies if needed
   if ! command -v make &> /dev/null; then
@@ -476,6 +636,10 @@ clone_and_install_linuwu_sense() {
     cd .. || return 1
     pause
     return 1
+  fi
+
+  if ! register_linuwu_sense_dkms; then
+    echo -e "${YELLOW}Warning: DKMS registration failed; rerun this installer after each kernel update.${NC}"
   fi
 
   cd .. || return 1
@@ -585,12 +749,32 @@ prepare_and_extract_release() {
 
   # Extract to temp dir
   local temp_dir="damx_installer_temp"
+  local release_root
   rm -rf "$temp_dir"
   mkdir -p "$temp_dir"
-  extract_release "$tarball" "$temp_dir"
+  if ! extract_release "$tarball" "$temp_dir"; then
+    echo -e "${RED}Failed to extract $tarball.${NC}"
+    rm -rf "$temp_dir"
+    pause
+    return 1
+  fi
+
+  # Release archives wrap their contents in a DAMX-<version>/ directory.
+  release_root=$(find "$temp_dir" -maxdepth 2 -type d -name DAMX-Daemon -printf '%h\n' | head -n 1)
+  if [ -z "$release_root" ] || [ ! -d "$release_root/DAMX-GUI" ]; then
+    echo -e "${RED}DAMX-GUI and DAMX-Daemon were not found in $tarball.${NC}"
+    rm -rf "$temp_dir"
+    pause
+    return 1
+  fi
+
   rm -rf DAMX-GUI DAMX-Daemon
-  mv "$temp_dir/DAMX-GUI" .
-  mv "$temp_dir/DAMX-Daemon" .
+  if ! mv "$release_root/DAMX-GUI" . || ! mv "$release_root/DAMX-Daemon" .; then
+    echo -e "${RED}Failed to prepare the DAMX release files.${NC}"
+    rm -rf "$temp_dir"
+    pause
+    return 1
+  fi
   rm -rf "$temp_dir"
   echo -e "${GREEN}Release extracted and prepared.${NC}"
 }
@@ -613,6 +797,9 @@ perform_install() {
     fi
   fi
 
+  # Likewise, make sure the release is usable before removing anything.
+  prepare_and_extract_release || return 1
+
   if [ "$is_update" = true ]; then
     echo -e "${BLUE}Performing cleanup before installation...${NC}"
     comprehensive_cleanup
@@ -623,8 +810,6 @@ perform_install() {
   fi
 
   mkdir -p ${INSTALL_DIR}
-
-  prepare_and_extract_release || return 1
 
   # Install components
   if [ "$skip_drivers" = false ]; then

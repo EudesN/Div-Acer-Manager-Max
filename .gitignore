@@ -16,3 +16,10 @@ DAMM-Daemon/build/
 DAMM-Daemon/dist/
 
 DAMM-Daemon/__pycache__/
+
+# Artifacts left by running the installers from the repository root
+DAMX-*.tar.xz
+DAMX-GUI/
+DAMX-Daemon/
+Linuwu-Sense/
+damx_installer_temp/

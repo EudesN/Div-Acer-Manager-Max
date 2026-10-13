@@ -382,6 +382,8 @@ class DAMXBuilder:
             "is_llvm_kernel",
             "prepare_secure_boot_signing",
             "sign_driver_module",
+            "patch_linuwu_sense_sources",
+            "register_linuwu_sense_dkms",
         ]
         missing_functions = [
             name for name in required_functions

@@ -11,12 +11,8 @@ public class App : Application
 {
     public override void Initialize()
     {
+        // The accent colour and its variants are defined in App.axaml.
         AvaloniaXamlLoader.Load(this);
-
-        var accentColor = Color.Parse("#1B89D8");
-        Application.Current.Resources["SystemAccentColor"] = accentColor;
-        Application.Current.Resources["SystemAccentBrush"] = new SolidColorBrush(accentColor);
-
     }
 
     public override void OnFrameworkInitializationCompleted()

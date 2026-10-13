@@ -615,29 +615,32 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         _cpuTempHistory = new ObservableCollection<double>();
         _gpuTempHistory = new ObservableCollection<double>();
 
-        // Initialize series
+        // Initialize series (colours match AccentColor / SuccessColor in App.axaml)
+        var cpuColor = new SKColor(0x3B, 0x9E, 0xFF);
+        var gpuColor = new SKColor(0x3D, 0xD6, 0x8C);
+
         _tempSeries = new ObservableCollection<ISeries>
         {
             new LineSeries<double>
             {
                 Values = _cpuTempHistory,
                 Name = "CPU Temperature",
-                Stroke = new SolidColorPaint(SKColors.CornflowerBlue) { StrokeThickness = 3 },
-                GeometryStroke = new SolidColorPaint(SKColors.DeepSkyBlue),
-                GeometryFill = new SolidColorPaint(SKColors.DeepSkyBlue),
-                Fill = new SolidColorPaint(SKColors.Transparent),
-                GeometrySize = 5,
+                Stroke = new SolidColorPaint(cpuColor) { StrokeThickness = 2.5f },
+                GeometryStroke = null,
+                GeometryFill = null,
+                GeometrySize = 0,
+                Fill = AreaFill(cpuColor),
                 XToolTipLabelFormatter = chartPoint => $"CPU: {chartPoint.Label}°C"
             },
             new LineSeries<double>
             {
                 Values = _gpuTempHistory,
                 Name = "GPU Temperature",
-                Stroke = new SolidColorPaint(SKColors.LimeGreen) { StrokeThickness = 3 },
-                GeometryFill = new SolidColorPaint(SKColors.GreenYellow),
-                GeometryStroke = new SolidColorPaint(SKColors.GreenYellow),
-                Fill = new SolidColorPaint(SKColors.Transparent),
-                GeometrySize = 5,
+                Stroke = new SolidColorPaint(gpuColor) { StrokeThickness = 2.5f },
+                GeometryStroke = null,
+                GeometryFill = null,
+                GeometrySize = 0,
+                Fill = AreaFill(gpuColor),
                 XToolTipLabelFormatter = chartPoint => $"GPU: {chartPoint.Label}°C"
             }
         };
@@ -659,12 +662,22 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
             {
                 new()
                 {
-                    Name = "Temperature (°C)",
-                    NamePaint = new SolidColorPaint(SKColors.Gray),
-                    LabelsPaint = new SolidColorPaint(SKColors.Gray)
+                    LabelsPaint = new SolidColorPaint(new SKColor(0x8B, 0x95, 0xA7)),
+                    TextSize = 12,
+                    Labeler = value => $"{value:0}°",
+                    SeparatorsPaint = new SolidColorPaint(new SKColor(0x23, 0x29, 0x35)) { StrokeThickness = 1 }
                 }
             };
         }
+    }
+
+    // Vertical gradient from a translucent line colour down to transparent.
+    private static LinearGradientPaint AreaFill(SKColor color)
+    {
+        return new LinearGradientPaint(
+            new[] { color.WithAlpha(70), color.WithAlpha(0) },
+            new SKPoint(0.5f, 0),
+            new SKPoint(0.5f, 1));
     }
 
     private double GetCpuUsage()

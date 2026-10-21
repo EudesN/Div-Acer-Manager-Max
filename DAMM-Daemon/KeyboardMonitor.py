@@ -3,19 +3,22 @@
 KeyboardMonitor - Simple keyboard monitor that launches GUI as regular user
 """
 
+import logging
 import os
-import struct
+import pwd
+import re
 import select
+import struct
 import subprocess
 import threading
-import logging
 import time
 from pathlib import Path
 
-# Determine if we're on 64-bit system
-import platform
-IS_64BIT = platform.machine().endswith('64')
-EVENT_SIZE = 24 if IS_64BIT else 16
+# struct input_event { struct timeval time; __u16 type; __u16 code; __s32 value; }
+# using the native C layout (24 bytes on 64-bit, 16 bytes on 32-bit).
+EVENT_FORMAT = 'llHHi'
+EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
+EVENTS_PER_READ = 64
 
 # Event types and codes
 EV_KEY = 1
@@ -57,7 +60,6 @@ class KeyboardMonitor:
                     if 'keyboard' in line.lower():
                         is_keyboard = True
                     elif line.startswith('H:') and 'event' in line:
-                        import re
                         match = re.search(r'event(\d+)', line)
                         if match:
                             event_num = match.group(1)
@@ -82,15 +84,18 @@ class KeyboardMonitor:
                 self.log.error("Could not determine user to run command")
                 return False
 
-            # Get the user's environment
-            env = os.environ.copy()
-            
-            # Add essential environment variables
-            env.update({
+            # The session bus belongs to the desktop user, not to root.
+            try:
+                pw = pwd.getpwnam(user)
+            except KeyError:
+                self.log.error(f"Unknown user {user!r}; cannot launch GUI")
+                return False
+
+            env = {
                 'DISPLAY': ':0',
-                'XAUTHORITY': f'/home/{user}/.Xauthority',
-                'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{os.getuid()}/bus'
-            })
+                'XAUTHORITY': os.path.join(pw.pw_dir, '.Xauthority'),
+                'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{pw.pw_uid}/bus'
+            }
 
             # Try running as the user with proper environment
             cmd = [
@@ -125,48 +130,63 @@ class KeyboardMonitor:
             # Fallback to first user in who output
             if result.stdout.strip():
                 return result.stdout.splitlines()[0].split()[0]
-                
-        except:
+
+        except Exception:
             pass
         return None
     
+    def _process_event(self, data):
+        _, _, event_type, code, value = struct.unpack(EVENT_FORMAT, data)
+        if event_type == EV_KEY and code == self.target_keycode and value == KEY_PRESS:
+            self.log.info(f"Target keycode {self.target_keycode} pressed!")
+            self.execute_command()
+
     def monitor_events(self):
-        """Monitor keyboard events"""
+        """Monitor keyboard events.
+
+        The device is read unbuffered (os.read on the raw fd, in multiples of
+        the input_event size) so select() always reflects what is unread;
+        a buffered file object would swallow queued events into its buffer.
+        """
         if not self.device_path:
             self.log.error("No device path set")
             return
-            
+
+        fd = None
         try:
-            with open(self.device_path, 'rb') as device:
-                self.log.info(f"Monitoring {self.device_path} for keycode {self.target_keycode}")
-                
-                while self.running:
-                    ready, _, _ = select.select([device], [], [], 1.0)
-                    
-                    if not ready:
-                        continue
-                        
-                    data = device.read(EVENT_SIZE)
-                    if len(data) != EVENT_SIZE:
-                        continue
-                    
-                    if IS_64BIT:
-                        _, _, event_type, code, value = struct.unpack('QQHHi', data)
-                    else:
-                        _, _, event_type, code, value = struct.unpack('IIHHi', data)
-                    
-                    if (event_type == EV_KEY and 
-                        code == self.target_keycode and 
-                        value == KEY_PRESS):
-                        
-                        self.log.info(f"Target keycode {self.target_keycode} pressed!")
-                        self.execute_command()
-                        
+            fd = os.open(self.device_path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            self.log.info(f"Monitoring {self.device_path} for keycode {self.target_keycode}")
+            pending = b""
+
+            while self.running:
+                ready, _, _ = select.select([fd], [], [], 1.0)
+                if not ready:
+                    continue
+                try:
+                    data = os.read(fd, EVENT_SIZE * EVENTS_PER_READ)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    self.log.warning(f"{self.device_path} closed")
+                    break
+
+                pending += data
+                usable = len(pending) - (len(pending) % EVENT_SIZE)
+                for off in range(0, usable, EVENT_SIZE):
+                    self._process_event(pending[off:off + EVENT_SIZE])
+                pending = pending[usable:]
+
         except PermissionError:
             self.log.error(f"Permission denied accessing {self.device_path}. Run as root.")
         except Exception as e:
             self.log.error(f"Error monitoring events: {e}")
-    
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
     def start_monitoring(self):
         """Start monitoring"""
         if self.running:

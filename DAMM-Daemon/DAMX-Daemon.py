@@ -2,27 +2,34 @@
 # DAMX-Daemon - Manage Acer laptop features as root service communicating with Linuwu-sense drivers
 # Compatible with Predator and Nitro laptops
 
-import os
-import subprocess
-import sys
-import json
-import time
 import argparse
+import configparser
 import ctypes
+import errno
 import fcntl
 import glob
+import grp
+import json
 import logging
 import logging.handlers
-import socket
-import threading
+import os
+import pwd
+import re
+import shutil
 import signal
-import configparser
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 import traceback
-from pathlib import Path
 from enum import Enum
-from PowerSourceDetection import PowerSourceDetector 
-from typing import Dict, List, Tuple, Set
-# from KeyboardMonitor import KeyboardMonitor
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
+
+from PowerSourceDetection import PowerSourceDetector
 
 # Constants
 VERSION = "0.5.2"
@@ -31,6 +38,45 @@ LOG_PATH = "/var/log/DAMX_Daemon_Log.log"
 CONFIG_PATH = "/etc/DAMX_Daemon/config.ini"
 PID_FILE = "/var/run/DAMX-Daemon.pid"
 MODPROBE_CONFIG_PATH = "/etc/modprobe.d/linuwu-sense.conf"
+# Runtime state (restart counter, ...).  The systemd unit sets
+# RuntimeDirectory=damx; the daemon creates it with 0700 if missing.
+RUNTIME_DIR = "/run/damx"
+
+MODULE_NAME = "linuwu_sense"
+SERVICE_NAME = "damx-daemon.service"
+SYSTEMCTL_PATH = "/usr/bin/systemctl"
+
+# ----------------------------------------------------------------- protocol
+# Newline-delimited JSON: one request object + "\n" per message, one response
+# object + "\n" per request.  Clients that send no newline are still accepted
+# when the buffered bytes form complete JSON value(s).
+MAX_MESSAGE_SIZE = 64 * 1024
+CLIENT_IDLE_TIMEOUT = 300.0      # seconds a connection may stay idle
+PARTIAL_MESSAGE_TIMEOUT = 1.0    # seconds to wait for the rest of an incomplete message
+MAX_CLIENTS = 16
+
+# ----------------------------------------------------------------- security
+DAMX_GROUP = "damx"
+PRIVILEGED_GROUPS = ("damx", "wheel", "sudo", "admin")
+PERMISSION_DENIED_ERROR = "permission denied: add your user to the 'damx' group"
+PRIVILEGED_COMMANDS = frozenset({
+    "force_nitro_model",
+    "force_predator_model",
+    "force_enable_all",
+    "set_modprobe_parameter_predator",
+    "set_modprobe_parameter_nitro",
+    "set_modprobe_parameter_enable_all",
+    "remove_modprobe_parameter",
+    "restart_daemon",
+    "restart_drivers_and_daemon",
+})
+# Any future command with one of these prefixes is privileged as well.
+PRIVILEGED_PREFIXES = ("force_", "set_modprobe_parameter", "remove_modprobe_parameter", "restart_")
+
+VALID_MODPROBE_PARAMS = ("nitro_v4", "predator_v4", "enable_all")
+HEX_COLOR_RE = re.compile(r"[0-9a-fA-F]{6}")
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+DEFAULT_CONFIG = {"General": {"LogLevel": "INFO", "AutoDetectFeatures": "True"}}
 
 # Acer ENEK5130 HID RGB controller used by newer Nitro/Predator models where
 # linuwu_sense exposes RGB sysfs files but color writes do not affect hardware.
@@ -61,469 +107,510 @@ def HIDIOCSFEATURE(length):
     # linux/hidraw.h: _IOC(_IOC_WRITE|_IOC_READ, 'H', 0x06, len)
     return _IOC(_IOC_WRITE | _IOC_READ, 'H', 0x06, length)
 
-# Check if running as root
-if os.geteuid() != 0:
-    print("This daemon must run as root. Please use sudo or run as root.")
-    sys.exit(1)
 
-# Configure logging
+# Sysfs locations (functions so tests can redirect the filesystem root).
+def _module_sysfs_path() -> str:
+    return "/sys/module/linuwu_sense"
+
+
+def _acer_wmi_path(*parts: str) -> str:
+    return os.path.join("/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi", *parts)
+
+
+def _platform_profile_path() -> str:
+    return "/sys/firmware/acpi/platform_profile"
+
+
+def _platform_profile_choices_path() -> str:
+    return "/sys/firmware/acpi/platform_profile_choices"
+
+
+def _tool_path(name: str, default: str) -> str:
+    return shutil.which(name) or default
+
+
+def _systemctl_path() -> str:
+    if os.path.exists(SYSTEMCTL_PATH):
+        return SYSTEMCTL_PATH
+    return shutil.which("systemctl") or SYSTEMCTL_PATH
+
+
+# Configure logging (level is set from config.ini in DAMXDaemon.load_config)
 log = logging.getLogger("DAMXDaemon")
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Console handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 log.addHandler(console_handler)
 
-# File handler with rotation
-file_handler = logging.handlers.RotatingFileHandler(
-    LOG_PATH, maxBytes=1024*1024*5, backupCount=5)
-file_handler.setFormatter(formatter)
-log.addHandler(file_handler)
+try:
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_PATH, maxBytes=1024 * 1024 * 5, backupCount=5)
+    file_handler.setFormatter(formatter)
+    log.addHandler(file_handler)
+except OSError as _e:
+    log.warning(f"Cannot open log file {LOG_PATH}: {_e}")
+
+
+# ----------------------------------------------------------------- helpers
+def _is_int(value) -> bool:
+    """True for real ints (bool is rejected even though it subclasses int)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _coerce_bool(value) -> Optional[bool]:
+    """Accept only true/false or the integers 0/1; anything else is invalid."""
+    if isinstance(value, bool):
+        return value
+    if _is_int(value) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _is_hex_color(value) -> bool:
+    return isinstance(value, str) and HEX_COLOR_RE.fullmatch(value) is not None
+
+
+def _describe_oserror(e: OSError) -> str:
+    if e.errno:
+        text = e.strerror or os.strerror(e.errno)
+        name = errno.errorcode.get(e.errno)
+        if e.errno == errno.EOPNOTSUPP:
+            name = "EOPNOTSUPP"  # same value as ENOTSUP on Linux; the kernel uses this name
+        return f"{text} ({name})" if name else text
+    return str(e)
+
+
+def _short(value, limit: int = 64) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "...'"
+
+
+def get_peer_credentials(sock: socket.socket) -> Tuple[int, int, int]:
+    """Return (pid, uid, gid) of the process on the other end of a unix socket."""
+    fmt = '3i'
+    data = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize(fmt))
+    return struct.unpack(fmt, data)
+
+
+def is_privileged_user(uid: int, gid: int) -> bool:
+    """root, or a member (primary or supplementary) of damx/wheel/sudo/admin."""
+    if uid == 0:
+        return True
+    if uid < 0:
+        return False
+
+    try:
+        pw = pwd.getpwuid(uid)
+    except KeyError:
+        pw = None
+
+    privileged_gids = set()
+    for name in PRIVILEGED_GROUPS:
+        try:
+            group = grp.getgrnam(name)
+        except KeyError:
+            continue
+        privileged_gids.add(group.gr_gid)
+        if pw is not None and pw.pw_name in group.gr_mem:
+            return True
+
+    user_gids = {gid}
+    if pw is not None:
+        user_gids.add(pw.pw_gid)
+        try:
+            user_gids.update(os.getgrouplist(pw.pw_name, pw.pw_gid))
+        except OSError:
+            pass
+    return bool(user_gids & privileged_gids)
+
+
+def is_privileged_command(command: str) -> bool:
+    return command in PRIVILEGED_COMMANDS or command.startswith(PRIVILEGED_PREFIXES)
+
 
 class LaptopType(Enum):
     UNKNOWN = 0
     PREDATOR = 1
     NITRO = 2
 
+
 class DAMXManager:
     """Manages all the DAMX-Daemon features"""
 
-    MAX_RESTART_ATTEMPTS = 20
-    RESTART_COUNTER_FILE = "/tmp/damx_restart_attempts"
+    # At most this many automatic module reloads per boot (/run is a tmpfs).
+    MAX_RESTART_ATTEMPTS = 1
+    RESTART_COUNTER_FILE = os.path.join(RUNTIME_DIR, "restart_attempts")
+    DRIVER_SETTLE_POLLS = 20
+    DRIVER_SETTLE_INTERVAL = 0.25
 
-    def __init__(self):
-        '''The initial init (i know very nice description)'''
+    def __init__(self, auto_recover: bool = True):
+        # Serialises hardware writes: platform_profile, fan_speed and the
+        # multi-packet ENEK RGB sequence.
+        self.lock = threading.RLock()
+        self._task_lock = threading.Lock()
+        self._tls = threading.local()
+        self.power_monitor = None
+
         log.info(f"** Starting DAMX-Daemon v{VERSION} **")
 
-        # Check if linuwu_sense is installed
-        if not os.path.exists("/sys/module/linuwu_sense"):
-            log.error("linuwu_sense module not found. Please install the linuwu_sense driver first.")
-        else:
-            log.info("linuwu_sense module found. Proceeding with initialization.")
-        
-        self.laptop_type = self._detect_laptop_type()
-        # self.keyboard_monitor = None
-
-        #added a delay so that driver sets up properly first
-        time.sleep(0.2)
-
-        # If unknown laptop type detected, try restarting drivers (with limit)
-        if self.laptop_type == LaptopType.UNKNOWN:
-            current_attempts = self._get_restart_attempts()
-            
-            if current_attempts < self.MAX_RESTART_ATTEMPTS:
-                attempts = self._increment_restart_attempts()
-                log.warning(f"Unknown laptop type detected, attempting driver restart (attempt {attempts}/{self.MAX_RESTART_ATTEMPTS})...")
-                
-                if self._restart_drivers_and_daemon():
-                    # The daemon will restart itself, so we should exit this instance
-                    log.info("Driver restart initiated, daemon will restart automatically")
-                    sys.exit(0)
-                else:
-                    log.error(f"Failed to restart drivers (attempt {attempts}), continuing with limited functionality")
-            else:
-                log.error(f"Maximum restart attempts ({self.MAX_RESTART_ATTEMPTS}) reached, giving up on driver restart")
-                log.info("Continuing with unknown laptop type and limited functionality")
-        else:
-            # Reset counter on successful detection
-            self._reset_restart_attempts()
-        
-        self.base_path = self._get_base_path()
-        self.has_four_zone_kb = self._check_four_zone_kb()
-        self.enek5130_hid_device = self._find_enek5130_hid_device()
-        self.current_modprobe_param = self._detect_current_modprobe_param()
-
-        # Available features set
-        self.available_features = self._detect_available_features()
+        self._detect_hardware()
+        if self.laptop_type == LaptopType.UNKNOWN and auto_recover:
+            self._auto_recover_unknown()
 
         log.info(f"Detected laptop type: {self.laptop_type.name}")
+        log.info(f"Driver loaded: {'Yes' if self.driver_loaded else 'No'} ({self.driver_status})")
         log.info(f"Base path: {self.base_path}")
         log.info(f"Four-zone keyboard: {'Yes' if self.has_four_zone_kb else 'No'}")
         log.info(f"ENEK5130 HID RGB device: {self.enek5130_hid_device or 'Not found'}")
-        log.info(f"Available features: {', '.join(self.available_features)}")
+        log.info(f"Available features: {', '.join(sorted(self.available_features))}")
+        if self.laptop_type == LaptopType.UNKNOWN:
+            log.warning(f"Running in reduced mode: {self.status_message}")
 
-        # Check if paths exist
-        if not os.path.exists(self.base_path) and self.laptop_type != LaptopType.UNKNOWN:
-            log.error(f"Base path does not exist: {self.base_path}")
-            raise FileNotFoundError(f"Base path does not exist: {self.base_path}")
-        
-        self.power_monitor = None
+    # ------------------------------------------------------------ errors
+    @property
+    def last_error(self) -> Optional[str]:
+        """Error text of the last failed operation in the calling thread."""
+        return getattr(self._tls, "last_error", None)
 
-    def _get_restart_attempts(self) -> int:
-        """Get current restart attempt count"""
-        try:
-            if os.path.exists(self.RESTART_COUNTER_FILE):
-                with open(self.RESTART_COUNTER_FILE, 'r') as f:
-                    return int(f.read().strip())
-        except (ValueError, IOError):
-            pass
-        return 0
+    def _set_last_error(self, message: Optional[str]):
+        self._tls.last_error = message
 
-    def _increment_restart_attempts(self) -> int:
-        """Increment and return restart attempt count"""
-        attempts = self._get_restart_attempts() + 1
-        try:
-            with open(self.RESTART_COUNTER_FILE, 'w') as f:
-                f.write(str(attempts))
-        except IOError as e:
-            log.error(f"Failed to write restart counter: {e}")
-        return attempts
+    # ------------------------------------------------------------ detection
+    def _detect_hardware(self):
+        with self.lock:
+            self.driver_loaded = os.path.exists(_module_sysfs_path())
+            self.laptop_type = self._detect_laptop_type()
+            self.base_path = self._get_base_path()
+            self.has_four_zone_kb = self._check_four_zone_kb()
+            self.enek5130_hid_device = self._find_enek5130_hid_device()
+            self.available_features = self._detect_available_features()
 
-    def _reset_restart_attempts(self):
-        """Reset restart attempt counter"""
-        try:
-            if os.path.exists(self.RESTART_COUNTER_FILE):
-                os.unlink(self.RESTART_COUNTER_FILE)
-        except IOError as e:
-            log.error(f"Failed to reset restart counter: {e}")
+    @property
+    def driver_status(self) -> str:
+        """'ok', 'not_loaded' or 'unsupported_model'."""
+        if self.laptop_type != LaptopType.UNKNOWN:
+            return "ok"
+        return "unsupported_model" if self.driver_loaded else "not_loaded"
 
-    def _force_model_nitro(self):
-        """Restart linuwu-sense driver and DAMX daemon service with nitro_v4 parameter"""
-        log.info("Forcing model detection to Nitro by restarting drivers and daemon")
+    @property
+    def status_message(self) -> str:
+        status = self.driver_status
+        if status == "ok":
+            return "Driver loaded"
+        if status == "not_loaded":
+            return ("linuwu_sense driver is not loaded; only the thermal profile is available. "
+                    "Install/load the linuwu_sense module.")
+        return ("linuwu_sense is loaded but did not recognise this laptop; only the thermal profile "
+                "is available. Try forcing the Nitro/Predator model.")
 
-        try:
-            # Remove the module
-            subprocess.run(['sudo', 'rmmod', 'linuwu_sense'], check=True)
-            log.info("Successfully removed linuwu-sense module")
-            
-            # Wait a moment
-            time.sleep(2)
-            
-            # Reload the module
-            subprocess.run(['sudo', 'modprobe', 'linuwu_sense', 'nitro_v4'], check=True)
-            log.info("Successfully reloaded linuwu-sense module")
-            
-            # Wait a moment for module to initialize
-            time.sleep(3)
-            
-            # Restart the daemon service
-            log.info("Restarting DAMX daemon service (may produce an error)")
-            subprocess.run(['sudo', 'systemctl', 'restart', 'damx-daemon.service'], check=True)
-            
-            return True
-        
-        except Exception as e:
-            log.error(f"Unexpected error while Forcing Nitro Model: {e}")
-            return False
-        
-
-    def _force_model_predator(self):
-        """Restart linuwu-sense driver and DAMX daemon service with predator_v4 parameter"""
-        log.info("Forcing model detection to Predator by restarting drivers and daemon")
-
-        try:
-            # Remove the module
-            subprocess.run(['sudo', 'rmmod', 'linuwu_sense'], check=True)
-            log.info("Successfully removed linuwu-sense module")
-            
-            # Wait a moment
-            time.sleep(2)
-            
-            # Reload the module
-            subprocess.run(['sudo', 'modprobe', 'linuwu_sense', 'predator_v4'], check=True)
-            log.info("Successfully reloaded linuwu-sense module")
-
-            # Wait a moment for module to initialize
-            time.sleep(3)
-
-            # Restart the daemon service
-            log.info("Restarting DAMX daemon service (may produce an error)")
-            subprocess.run(['sudo', 'systemctl', 'restart', 'damx-daemon.service'], check=True)
-
-            return True
-
-        except Exception as e:
-            log.error(f"Unexpected error while Forcing Predator Model: {e}")
-            return False
-
-    def _force_enable_all(self):
-        """Restart linuwu-sense driver and DAMX daemon service with enable_all parameter"""
-        log.info("Forcing all features by restarting daemon and drivers with parameter enable_all")
-
-        try:
-            # Remove the module
-            subprocess.run(['sudo', 'rmmod', 'linuwu_sense'], check=True)
-            log.info("Successfully removed linuwu-sense module")
-            
-            # Wait a moment
-            time.sleep(2)
-            
-            # Reload the module
-            subprocess.run(['sudo', 'modprobe', 'linuwu_sense', 'enable_all'], check=True)
-            log.info("Successfully reloaded linuwu-sense module with enable_all parameter")
-            
-            # Wait a moment for module to initialize
-            time.sleep(3)
-            
-            # Restart the daemon service
-            log.info("Restarting DAMX daemon service (may produce an error)")
-            subprocess.run(['sudo', 'systemctl', 'restart', 'damx-daemon.service'], check=True)
-            
-            return True
-        
-        except Exception as e:
-            log.error(f"Unexpected error while Forcing All Features: {e}")
-            return False
-        
-    def _detect_current_modprobe_param(self) -> str:
-        """Detect which modprobe parameter is currently set"""
-        try:
-            if os.path.exists(MODPROBE_CONFIG_PATH):
-                with open(MODPROBE_CONFIG_PATH, 'r') as f:
-                    content = f.read().strip().lower()
-                    if "nitro_v4" in content:
-                        return "nitro_v4"
-                    elif "predator_v4" in content:
-                        return "predator_v4"
-                    elif "enable_all" in content:
-                        return "enable_all"
-        except Exception as e:
-            log.error(f"Failed to read modprobe config: {e}")
-        return ""
-
-    def _set_modprobe_parameter(self, param: str) -> bool:
-        """Set modprobe parameter in config file"""
-        try:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(MODPROBE_CONFIG_PATH), exist_ok=True)
-            
-            # Write the config file
-            with open(MODPROBE_CONFIG_PATH, 'w') as f:
-                f.write(f"options linuwu_sense {param}=1\n")
-                f.flush()
-                os.fsync(f.fileno())  # Force write to disk
-            
-            # Verify the write was successful
-            time.sleep(0.1)  # Small delay to ensure file system sync
-            if os.path.exists(MODPROBE_CONFIG_PATH):
-                with open(MODPROBE_CONFIG_PATH, 'r') as f:
-                    content = f.read().strip()
-                    expected = f"options linuwu_sense {param}=1"
-                    if expected in content:
-                        log.info(f"Successfully set modprobe parameter: {param}")
-                        self.current_modprobe_param = param
-                        return True
-                    else:
-                        log.error(f"Verification failed. Expected '{expected}', got '{content}'")
-                        return False
-            else:
-                log.error(f"Config file not found after write: {MODPROBE_CONFIG_PATH}")
-                return False
-                
-        except Exception as e:
-            log.error(f"Failed to set modprobe parameter: {e}")
-            return False
-
-    def _remove_modprobe_parameter(self) -> bool:
-        """Remove modprobe parameter config file"""
-        try:
-            if os.path.exists(MODPROBE_CONFIG_PATH):
-                os.unlink(MODPROBE_CONFIG_PATH)
-                # Verify removal
-                time.sleep(0.1)
-                if not os.path.exists(MODPROBE_CONFIG_PATH):
-                    log.info("Successfully removed modprobe parameter config")
-                    self.current_modprobe_param = ""
-                    return True
-                else:
-                    log.error("Failed to verify modprobe parameter removal")
-                    return False
-            else:
-                self.current_modprobe_param = ""
-                return True
-        except Exception as e:
-            log.error(f"Failed to remove modprobe parameter: {e}")
-            return False
-
-    def get_modprobe_parameter(self) -> str:
-        """Get current modprobe parameter"""
-        return self.current_modprobe_param
-
-    def set_modprobe_parameter(self, param: str) -> bool:
-        """Set modprobe parameter and restart drivers"""
-        log.info(f"Attempting to set modprobe parameter: {param}")
-        log.info(f"Current parameter: {self.current_modprobe_param}")
-        log.info(f"Config path: {MODPROBE_CONFIG_PATH}")
-        
-        if param not in ["nitro_v4", "predator_v4", "enable_all", ""]:
-            log.error(f"Invalid modprobe parameter: {param}")
-            return False
-        
-        if param == "":
-            # Remove parameter
-            log.info("Removing modprobe parameter")
-            if not self._remove_modprobe_parameter():
-                log.error("Failed to remove modprobe parameter")
-                return False
-        else:
-            # Set parameter
-            log.info(f"Setting modprobe parameter to: {param}")
-            if not self._set_modprobe_parameter(param):
-                log.error(f"Failed to set modprobe parameter: {param}")
-                return False
-        
-        # Verify the change
-        if param != "":
-            if not self._verify_modprobe_parameter(param):
-                log.error(f"Verification failed for parameter: {param}")
-                return False
-        
-        # Restart drivers and daemon
-        log.info("Restarting drivers and daemon with new parameter")
-        return self._restart_drivers_and_daemon()
-
-    def _verify_modprobe_parameter(self, param: str) -> bool:
-        """Verify that the modprobe parameter was written correctly"""
-        try:
-            if os.path.exists(MODPROBE_CONFIG_PATH):
-                with open(MODPROBE_CONFIG_PATH, 'r') as f:
-                    content = f.read().strip()
-                    expected = f"options linuwu_sense {param}=1"
-                    if expected in content:
-                        log.info(f"Verification successful for parameter: {param}")
-                        return True
-                    else:
-                        log.error(f"Verification failed. Expected '{expected}', got '{content}'")
-                        return False
-            else:
-                log.error(f"Config file does not exist: {MODPROBE_CONFIG_PATH}")
-                return False
-        except Exception as e:
-            log.error(f"Verification error: {e}")
-            return False
-        
-    def _restart_daemon(self):
-        """Restart DAMX daemon service alone"""
-        attempts = self._get_restart_attempts()
-        log.info(f"Attempting to restart daemon")
-        
-        try:
-            # Restart the daemon service
-            log.info("Restarting DAMX daemon service (may produce an error)")
-            subprocess.run(['sudo', 'systemctl', 'restart', 'damx-daemon.service'], check=True)
-            
-            return True
-            
-        except Exception as e:
-            log.error(f"Unexpected error during restart (attempt {attempts}): {e}")
-            return False
-            
-
-    def _restart_drivers_and_daemon(self):
-        """Restart linuwu-sense driver and DAMX daemon service"""
-        attempts = self._get_restart_attempts()
-        log.info(f"Attempting to restart drivers and daemon (attempt {attempts}/{self.MAX_RESTART_ATTEMPTS})...")
-        
-        try:
-            # Remove the module
-            subprocess.run(['sudo', 'rmmod', 'linuwu_sense'], check=True)
-            log.info("Successfully removed linuwu-sense module")
-            
-            # Wait a moment
-            time.sleep(2)
-            
-            # Reload the module
-            subprocess.run(['sudo', 'modprobe', 'linuwu_sense'], check=True)
-            log.info("Successfully reloaded linuwu-sense module")
-            
-            # Wait a moment for module to initialize
-            time.sleep(3)
-            
-            # Restart the daemon service
-            log.info("Restarting DAMX daemon service (may produce an error)")
-            subprocess.run(['sudo', 'systemctl', 'restart', 'damx-daemon.service'], check=True)
-            
-            return True
-            
-        except Exception as e:
-            log.error(f"Unexpected error during restart (attempt {attempts}): {e}")
-            return False
-            
     def _detect_laptop_type(self) -> LaptopType:
         """Detect whether this is a Predator or Nitro laptop"""
-        predator_path = "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense"
-        nitro_path = "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/nitro_sense"
-
-        if os.path.exists(predator_path):
+        if os.path.exists(_acer_wmi_path("predator_sense")):
             return LaptopType.PREDATOR
-        elif os.path.exists(nitro_path):
+        if os.path.exists(_acer_wmi_path("nitro_sense")):
             return LaptopType.NITRO
-        else:
-            return LaptopType.UNKNOWN
+        return LaptopType.UNKNOWN
 
     def _get_base_path(self) -> str:
         """Get the base path for VFS access based on laptop type"""
         if self.laptop_type == LaptopType.PREDATOR:
-            return "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense"
-        elif self.laptop_type == LaptopType.NITRO:
-            return "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/nitro_sense"
-        else:
-            return ""
+            return _acer_wmi_path("predator_sense")
+        if self.laptop_type == LaptopType.NITRO:
+            return _acer_wmi_path("nitro_sense")
+        return ""
 
-    def get_driver_version(self) -> str:
-        """Get Driver version"""
-        version_file = os.path.join(self.base_path, "version")
-        if not os.path.isfile(version_file):
-            return "Unknown Version"
-        
-        try:
-            with open(version_file, "r") as f:
-                return f.read().strip() or "Unknown Version"
-        except (OSError, IOError):
-            return "Unknown Version"
-    
+    def _check_four_zone_kb(self) -> bool:
+        """Check if four-zone keyboard is available"""
+        if self.laptop_type != LaptopType.UNKNOWN:
+            return os.path.exists(_acer_wmi_path("four_zoned_kb"))
+        return False
 
     def _detect_available_features(self) -> Set[str]:
         """Detect which features are available on the current laptop"""
         available = set()
 
         # Always check thermal profile since it's ACPI standard
-        if os.path.exists("/sys/firmware/acpi/platform_profile"):
+        if os.path.exists(_platform_profile_path()):
             available.add("thermal_profile")
 
         # Only check other features if laptop type is recognized
         if self.laptop_type != LaptopType.UNKNOWN and os.path.exists(self.base_path):
-            feature_files = [
-                ("backlight_timeout", "backlight_timeout"),
-                ("battery_calibration", "battery_calibration"),
-                ("battery_limiter", "battery_limiter"),
-                ("boot_animation_sound", "boot_animation_sound"),
-                ("fan_speed", "fan_speed"),
-                ("lcd_override", "lcd_override"),
-                ("usb_charging", "usb_charging"),
-            ]
+            for feature in ("backlight_timeout", "battery_calibration", "battery_limiter",
+                            "boot_animation_sound", "fan_speed", "lcd_override", "usb_charging"):
+                if os.path.exists(os.path.join(self.base_path, feature)):
+                    available.add(feature)
 
-            for feature_name, file_name in feature_files:
-                file_path = os.path.join(self.base_path, file_name)
-                if os.path.exists(file_path):
-                    available.add(feature_name)
-
-        # Check keyboard features
         if self.has_four_zone_kb:
-            kb_base = "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb"
-            if os.path.exists(os.path.join(kb_base, "per_zone_mode")):
-                available.add("per_zone_mode")
-            if os.path.exists(os.path.join(kb_base, "four_zone_mode")):
-                available.add("four_zone_mode")
+            for feature in ("per_zone_mode", "four_zone_mode"):
+                if os.path.exists(_acer_wmi_path("four_zoned_kb", feature)):
+                    available.add(feature)
 
         # Newer Acer keyboards can require direct ENEK5130 HID feature reports.
-        # Do not advertise the existing linuwu_sense RGB feature names unless
-        # their sysfs files exist; the ENEK backend is currently a static-color
-        # supplement for devices where those sysfs writes are ineffective.
         if self.enek5130_hid_device:
             available.add("enek5130_hid_rgb")
 
         return available
 
-    def _check_four_zone_kb(self) -> bool:
-        """Check if four-zone keyboard is available"""
-        if self.laptop_type != LaptopType.UNKNOWN:
-            kb_path = "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb"
-            return os.path.exists(kb_path)
+    def get_driver_version(self) -> str:
+        """Get Driver version"""
+        if not self.base_path:
+            return "Unknown Version"
+        version_file = os.path.join(self.base_path, "version")
+        if not os.path.isfile(version_file):
+            return "Unknown Version"
+        try:
+            with open(version_file, "r") as f:
+                return f.read().strip() or "Unknown Version"
+        except OSError:
+            return "Unknown Version"
+
+    # ------------------------------------------------------------ driver recovery
+    def _auto_recover_unknown(self):
+        """Reload linuwu_sense at most once per boot when the model is not detected."""
+        if not self.driver_loaded:
+            log.error("linuwu_sense module is not loaded. Please install the linuwu_sense driver; "
+                      "not attempting an automatic reload.")
+            return
+
+        attempts = self._get_restart_attempts()
+        if attempts >= self.MAX_RESTART_ATTEMPTS:
+            log.warning(f"Automatic driver reload already attempted this boot ({attempts}); not retrying")
+            return
+
+        recorded = self._increment_restart_attempts()
+        if recorded is None:
+            log.error("Cannot record the driver reload attempt; skipping it to avoid reload loops")
+            return
+
+        log.warning(f"Unknown laptop type detected, reloading linuwu_sense once "
+                    f"(attempt {recorded}/{self.MAX_RESTART_ATTEMPTS} this boot)")
+        if self._reload_module():
+            self._wait_for_driver()
+        self._detect_hardware()
+        if self.laptop_type == LaptopType.UNKNOWN:
+            log.error("Laptop type still unknown after driver reload")
+        else:
+            log.info(f"Driver reload recovered laptop type {self.laptop_type.name}")
+
+    def _counter_path(self) -> str:
+        return self.RESTART_COUNTER_FILE
+
+    def _ensure_runtime_dir(self) -> str:
+        d = os.path.dirname(self._counter_path())
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError(errno.ENOTDIR, f"{d} is not a directory")
+        if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & 0o022:
+            os.chmod(d, 0o700)
+        return d
+
+    def _get_restart_attempts(self) -> int:
+        """Get current restart attempt count (never follows symlinks)."""
+        path = self._counter_path()
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return 0
+        except OSError as e:
+            log.warning(f"Ignoring unusable restart counter {path}: {_describe_oserror(e)}")
+            return 0
+        try:
+            data = os.read(fd, 64)
+        finally:
+            os.close(fd)
+        try:
+            return max(0, int(data.decode().strip()))
+        except (ValueError, UnicodeDecodeError):
+            return 0
+
+    def _increment_restart_attempts(self) -> Optional[int]:
+        """Increment the restart counter; returns the new value or None on failure."""
+        attempts = self._get_restart_attempts() + 1
+        path = self._counter_path()
+        try:
+            self._ensure_runtime_dir()
+            if os.path.islink(path):
+                os.unlink(path)  # removes the link itself, never its target
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                os.write(fd, str(attempts).encode())
+            finally:
+                os.close(fd)
+            return attempts
+        except OSError as e:
+            log.error(f"Failed to write restart counter {path}: {_describe_oserror(e)}")
+            return None
+
+    def _reload_module(self, module_args: Tuple[str, ...] = ()) -> bool:
+        """rmmod + modprobe linuwu_sense (the daemon runs as root: no sudo)."""
+        rmmod = _tool_path("rmmod", "/usr/sbin/rmmod")
+        modprobe = _tool_path("modprobe", "/usr/sbin/modprobe")
+        try:
+            if os.path.exists(_module_sysfs_path()):
+                subprocess.run([rmmod, MODULE_NAME], check=True, capture_output=True, text=True, timeout=60)
+                log.info("Removed linuwu_sense module")
+            subprocess.run([modprobe, MODULE_NAME, *module_args], check=True,
+                           capture_output=True, text=True, timeout=60)
+            log.info(f"Loaded linuwu_sense module {' '.join(module_args)}".rstrip())
+            return True
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or "").strip() if isinstance(e.stderr, str) else ""
+            log.error(f"Driver reload failed: {e.cmd} exited with {e.returncode} {detail}".rstrip())
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.error(f"Driver reload failed: {e}")
         return False
 
+    def _wait_for_driver(self):
+        for _ in range(self.DRIVER_SETTLE_POLLS):
+            if self._detect_laptop_type() != LaptopType.UNKNOWN:
+                return
+            time.sleep(self.DRIVER_SETTLE_INTERVAL)
+
+    def reload_driver_and_redetect(self, module_args: Tuple[str, ...] = (), restart_daemon: bool = False) -> bool:
+        """Reload the module, re-detect features and optionally restart the service.
+
+        Runs in a background thread after the client already got its reply.
+        """
+        ok = self._reload_module(tuple(module_args))
+        if ok:
+            self._wait_for_driver()
+        self._detect_hardware()
+        log.info(f"Re-detected laptop type {self.laptop_type.name}; "
+                 f"features: {', '.join(sorted(self.available_features))}")
+        if restart_daemon:
+            ok = self.restart_daemon() and ok
+        return ok
+
+    def restart_daemon(self) -> bool:
+        """Ask systemd to restart the service (non-blocking job)."""
+        try:
+            subprocess.run([_systemctl_path(), "--no-block", "restart", SERVICE_NAME],
+                           check=True, capture_output=True, text=True, timeout=30)
+            log.info("Requested restart of the DAMX daemon service")
+            return True
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as e:
+            log.error(f"Failed to restart {SERVICE_NAME}: {e}")
+            return False
+
+    @property
+    def restart_in_progress(self) -> bool:
+        return self._task_lock.locked()
+
+    def start_background_task(self, name: str, func: Callable, *args, **kwargs) -> bool:
+        """Run a driver/daemon restart in a detached thread; one at a time."""
+        if not self._task_lock.acquire(blocking=False):
+            log.warning(f"Not starting {name}: another driver/daemon restart is in progress")
+            return False
+
+        def runner():
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                log.error(f"Background task {name} failed:\n{traceback.format_exc()}")
+            finally:
+                self._task_lock.release()
+
+        threading.Thread(target=runner, name=name, daemon=True).start()
+        return True
+
+    # ------------------------------------------------------------ modprobe parameter
+    def _detect_current_modprobe_param(self) -> str:
+        """Read the persistent modprobe parameter from disk."""
+        try:
+            with open(MODPROBE_CONFIG_PATH, 'r') as f:
+                content = f.read()
+        except FileNotFoundError:
+            return ""
+        except OSError as e:
+            log.error(f"Failed to read modprobe config: {e}")
+            return ""
+        for line in content.lower().splitlines():
+            line = line.strip()
+            if not line.startswith("options"):
+                continue
+            for param in VALID_MODPROBE_PARAMS:
+                if param in line:
+                    return param
+        return ""
+
+    @property
+    def current_modprobe_param(self) -> str:
+        return self._detect_current_modprobe_param()
+
+    def get_modprobe_parameter(self) -> str:
+        """Get current modprobe parameter (always re-read from disk)"""
+        return self._detect_current_modprobe_param()
+
+    @staticmethod
+    def _atomic_write(path: str, content: str, mode: int = 0o644):
+        """Write a file atomically: temp file in the same dir + fsync + os.replace."""
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        try:
+            dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+
+    def set_modprobe_parameter(self, param: str) -> bool:
+        """Persist a modprobe parameter.  Applying it (module reload) is up to the caller."""
+        if not isinstance(param, str) or param not in VALID_MODPROBE_PARAMS + ("",):
+            log.error(f"Invalid modprobe parameter: {_short(param)}")
+            self._set_last_error("invalid modprobe parameter")
+            return False
+        if param == "":
+            return self.remove_modprobe_parameter()
+
+        with self.lock:
+            try:
+                self._atomic_write(MODPROBE_CONFIG_PATH, f"options {MODULE_NAME} {param}=1\n")
+            except OSError as e:
+                self._set_last_error(_describe_oserror(e))
+                log.error(f"Failed to write {MODPROBE_CONFIG_PATH}: {e}")
+                return False
+
+        if self._detect_current_modprobe_param() != param:
+            self._set_last_error("verification failed after write")
+            log.error(f"Verification of modprobe parameter {param} failed")
+            return False
+        log.info(f"Persisted modprobe parameter: {param}")
+        return True
+
+    def remove_modprobe_parameter(self) -> bool:
+        """Remove modprobe parameter config file"""
+        with self.lock:
+            try:
+                os.unlink(MODPROBE_CONFIG_PATH)
+                log.info("Removed modprobe parameter config")
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                self._set_last_error(_describe_oserror(e))
+                log.error(f"Failed to remove modprobe parameter: {e}")
+                return False
+        return self._detect_current_modprobe_param() == ""
+
+    # ------------------------------------------------------------ sysfs I/O
     def _read_file(self, path: str) -> str:
         """Read from a VFS file"""
         try:
@@ -534,15 +621,35 @@ class DAMXManager:
             return ""
 
     def _write_file(self, path: str, value: str) -> bool:
-        """Write to a VFS file"""
+        """Write ``value`` + "\\n" to a VFS file in a single write() call."""
+        data = (str(value).strip() + "\n").encode()
         try:
-            with open(path, 'w') as f:
-                f.write(str(value))
+            fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC)
+            try:
+                written = os.write(fd, data)
+            finally:
+                os.close(fd)
+            if written != len(data):
+                raise OSError(errno.EIO, f"short write ({written}/{len(data)} bytes)")
+            self._set_last_error(None)
             return True
-        except Exception as e:
-            log.error(f"Failed to write to {path}: {e}")
+        except OSError as e:
+            self._set_last_error(_describe_oserror(e))
+            log.error(f"Failed to write {str(value).strip()!r} to {path}: {_describe_oserror(e)}")
             return False
 
+    def _set_toggle(self, feature: str, enabled) -> bool:
+        if feature not in self.available_features:
+            self._set_last_error(f"{feature} is not supported on this device")
+            return False
+        value = _coerce_bool(enabled)
+        if value is None:
+            self._set_last_error(f"invalid value {_short(enabled)} for {feature}: expected true/false")
+            log.error(f"Invalid boolean for {feature}: {_short(enabled)}")
+            return False
+        return self._write_file(os.path.join(self.base_path, feature), "1" if value else "0")
+
+    # ------------------------------------------------------------ ENEK5130 HID RGB
     def _find_enek5130_hid_device(self) -> str:
         """Find the ENEK5130 RGB hidraw device by stable sysfs identity."""
         candidates = self._find_enek5130_hid_candidates()
@@ -687,985 +794,953 @@ class DAMXManager:
             effect, red, green, blue, brightness, hid_speed, direction, 0x0F
         )
 
+    # ------------------------------------------------------------ thermal profile
     def get_thermal_profile(self) -> str:
         """Get current thermal profile"""
         if "thermal_profile" not in self.available_features:
             return ""
-        return self._read_file("/sys/firmware/acpi/platform_profile")
+        return self._read_file(_platform_profile_path())
 
     def set_thermal_profile(self, profile: str) -> bool:
-        """Set thermal profile"""
+        """Set thermal profile (only values offered by platform_profile_choices)."""
         if "thermal_profile" not in self.available_features:
+            self._set_last_error("thermal profile is not supported on this device")
             return False
 
         available_profiles = self.get_thermal_profile_choices()
-        if profile not in available_profiles:
-            log.error(f"Invalid thermal profile: {profile}. Available profiles: {available_profiles}")
+        if not isinstance(profile, str) or profile not in available_profiles:
+            self._set_last_error(f"invalid thermal profile {_short(profile)}; "
+                                 f"available: {', '.join(available_profiles) or 'none'}")
+            log.error(f"Invalid thermal profile: {_short(profile)}. Available profiles: {available_profiles}")
             return False
 
-        return self._write_file("/sys/firmware/acpi/platform_profile", profile)
+        with self.lock:
+            return self._write_file(_platform_profile_path(), profile)
 
     def get_thermal_profile_choices(self) -> List[str]:
-        """Get available thermal profiles"""
+        """Get available thermal profiles (as advertised by the kernel)"""
         if "thermal_profile" not in self.available_features:
             return []
-
-        choices = self._read_file("/sys/firmware/acpi/platform_profile_choices")
+        choices = self._read_file(_platform_profile_choices_path())
         return choices.split() if choices else []
 
+    # ------------------------------------------------------------ toggles
     def get_backlight_timeout(self) -> str:
-        """Get backlight timeout status"""
         if "backlight_timeout" not in self.available_features:
             return ""
-
         return self._read_file(os.path.join(self.base_path, "backlight_timeout"))
 
     def set_backlight_timeout(self, enabled: bool) -> bool:
-        """Set backlight timeout status"""
-        if "backlight_timeout" not in self.available_features:
-            return False
-
-        return self._write_file(
-            os.path.join(self.base_path, "backlight_timeout"),
-            "1" if enabled else "0"
-        )
+        return self._set_toggle("backlight_timeout", enabled)
 
     def get_battery_calibration(self) -> str:
-        """Get battery calibration status"""
         if "battery_calibration" not in self.available_features:
             return ""
-
         return self._read_file(os.path.join(self.base_path, "battery_calibration"))
 
     def set_battery_calibration(self, enabled: bool) -> bool:
-        """Start or stop battery calibration"""
-        if "battery_calibration" not in self.available_features:
-            return False
-
-        return self._write_file(
-            os.path.join(self.base_path, "battery_calibration"),
-            "1" if enabled else "0"
-        )
+        return self._set_toggle("battery_calibration", enabled)
 
     def get_battery_limiter(self) -> str:
-        """Get battery limiter status"""
         if "battery_limiter" not in self.available_features:
             return ""
-
         return self._read_file(os.path.join(self.base_path, "battery_limiter"))
 
     def set_battery_limiter(self, enabled: bool) -> bool:
-        """Set battery limiter status"""
-        if "battery_limiter" not in self.available_features:
-            return False
-
-        return self._write_file(
-            os.path.join(self.base_path, "battery_limiter"),
-            "1" if enabled else "0"
-        )
+        return self._set_toggle("battery_limiter", enabled)
 
     def get_boot_animation_sound(self) -> str:
-        """Get boot animation sound status"""
         if "boot_animation_sound" not in self.available_features:
             return ""
-
         return self._read_file(os.path.join(self.base_path, "boot_animation_sound"))
 
     def set_boot_animation_sound(self, enabled: bool) -> bool:
-        """Set boot animation sound status"""
-        if "boot_animation_sound" not in self.available_features:
-            return False
+        return self._set_toggle("boot_animation_sound", enabled)
 
-        return self._write_file(
-            os.path.join(self.base_path, "boot_animation_sound"),
-            "1" if enabled else "0"
-        )
+    def get_lcd_override(self) -> str:
+        if "lcd_override" not in self.available_features:
+            return ""
+        return self._read_file(os.path.join(self.base_path, "lcd_override"))
+
+    def set_lcd_override(self, enabled: bool) -> bool:
+        return self._set_toggle("lcd_override", enabled)
+
+    # ------------------------------------------------------------ fans
+    def _read_fan_values(self) -> Optional[Tuple[str, str]]:
+        try:
+            with open(os.path.join(self.base_path, "fan_speed"), 'r') as f:
+                speeds = f.read().strip()
+        except OSError as e:
+            log.error(f"Error reading fan speed: {e}")
+            return None
+        if "," not in speeds:
+            return None
+        cpu, gpu = speeds.split(",", 1)
+        return cpu.strip(), gpu.strip()
 
     def get_fan_speed(self) -> Tuple[str, str]:
         """Get CPU and GPU fan speeds"""
         if "fan_speed" not in self.available_features:
             return ("", "")
+        return self._read_fan_values() or ("0", "0")
 
-        file_path = os.path.join(self.base_path, "fan_speed")
-
+    def get_fan_mode(self) -> str:
+        """Current fan mode reported by the driver: auto, max, manual, unknown or ''."""
+        if "fan_speed" not in self.available_features:
+            return ""
+        values = self._read_fan_values()
+        if values is None:
+            return "unknown"
         try:
-            with open(file_path, 'r') as f:
-                speeds = f.read().strip()
-
-                if "," in speeds:
-                    cpu, gpu = speeds.split(",", 1)
-                    return (cpu.strip(), gpu.strip())
-        except Exception as e:
-            log.error(f"Error reading fan speed: {e}")
-
-        return ("0", "0")  # Fallback
+            cpu, gpu = int(values[0]), int(values[1])
+        except ValueError:
+            return "unknown"
+        if cpu == 0 and gpu == 0:
+            return "auto"
+        if cpu == 100 and gpu == 100:
+            return "max"
+        return "manual"
 
     def set_fan_speed(self, cpu: int, gpu: int) -> bool:
-        """Set CPU and GPU fan speeds"""
+        """Set CPU and GPU fan speeds (0 = auto, 1..100 = percent)"""
         if "fan_speed" not in self.available_features:
+            self._set_last_error("fan speed control is not supported on this device")
             return False
-
-        # Validate values
-        if not (0 <= cpu <= 100 and 0 <= gpu <= 100):
-            log.error(f"Invalid fan speeds. Values must be between 0 and 100: cpu={cpu}, gpu={gpu}")
+        if not (_is_int(cpu) and _is_int(gpu) and 0 <= cpu <= 100 and 0 <= gpu <= 100):
+            self._set_last_error("fan speeds must be integers between 0 and 100")
+            log.error(f"Invalid fan speeds. Values must be integers 0-100: cpu={_short(cpu)}, gpu={_short(gpu)}")
             return False
+        with self.lock:
+            return self._write_file(os.path.join(self.base_path, "fan_speed"), f"{cpu},{gpu}")
 
-        return self._write_file(
-            os.path.join(self.base_path, "fan_speed"),
-            f"{cpu},{gpu}"
-        )
-
-
-    def get_lcd_override(self) -> str:
-        """Get LCD override status"""
-        if "lcd_override" not in self.available_features:
-            return ""
-
-        return self._read_file(os.path.join(self.base_path, "lcd_override"))
-
-    def set_lcd_override(self, enabled: bool) -> bool:
-        """Set LCD override status"""
-        if "lcd_override" not in self.available_features:
-            return False
-
-        return self._write_file(
-            os.path.join(self.base_path, "lcd_override"),
-            "1" if enabled else "0"
-        )
-
+    # ------------------------------------------------------------ usb charging
     def get_usb_charging(self) -> str:
-        """Get USB charging status"""
         if "usb_charging" not in self.available_features:
             return ""
-
         return self._read_file(os.path.join(self.base_path, "usb_charging"))
 
     def set_usb_charging(self, level: int) -> bool:
         """Set USB charging level (0, 10, 20, 30)"""
         if "usb_charging" not in self.available_features:
             return False
-
-        # Validate values
-        if level not in [0, 10, 20, 30]:
-            log.error(f"Invalid USB charging level. Must be 0, 10, 20, or 30: {level}")
+        if not _is_int(level) or level not in (0, 10, 20, 30):
+            self._set_last_error("USB charging level must be 0, 10, 20 or 30")
+            log.error(f"Invalid USB charging level. Must be 0, 10, 20, or 30: {_short(level)}")
             return False
+        return self._write_file(os.path.join(self.base_path, "usb_charging"), str(level))
 
-        return self._write_file(
-            os.path.join(self.base_path, "usb_charging"),
-            str(level)
-        )
-
+    # ------------------------------------------------------------ keyboard
     def get_per_zone_mode(self) -> str:
-        """Get per-zone mode configuration"""
         if "per_zone_mode" not in self.available_features:
             return ""
-
-        return self._read_file("/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/per_zone_mode")
+        return self._read_file(_acer_wmi_path("four_zoned_kb", "per_zone_mode"))
 
     def set_per_zone_mode(self, zone1: str, zone2: str, zone3: str, zone4: str, brightness: int) -> bool:
-        """Set per-zone mode configuration
-        
-        Args:
-            zone1-zone4: RGB hex values (e.g., "4287f5")
-            brightness: 0-100
-        """
+        """Set per-zone mode: zone1-zone4 are RRGGBB hex strings, brightness 0-100."""
         if "per_zone_mode" not in self.available_features:
             return False
 
-        # Validate hex values
-        for i, zone in enumerate([zone1, zone2, zone3, zone4], 1):
-            try:
-                # Check if valid hex color
-                int(zone, 16)
-                if len(zone) != 6:
-                    log.error(f"Invalid hex color for zone {i}: {zone}. Must be 6 characters.")
-                    return False
-            except ValueError:
-                log.error(f"Invalid hex color for zone {i}: {zone}")
+        zones = [zone1, zone2, zone3, zone4]
+        for i, zone in enumerate(zones, 1):
+            if not _is_hex_color(zone):
+                self._set_last_error(f"zone{i} must be a 6-digit hex color (RRGGBB)")
+                log.error(f"Invalid hex color for zone {i}: {_short(zone)}")
                 return False
 
-        # Validate brightness
-        if not (0 <= brightness <= 100):
-            log.error(f"Invalid brightness. Must be between 0 and 100: {brightness}")
+        if not _is_int(brightness) or not (0 <= brightness <= 100):
+            self._set_last_error("brightness must be an integer between 0 and 100")
+            log.error(f"Invalid brightness. Must be between 0 and 100: {_short(brightness)}")
             return False
 
-        value = f"{zone1},{zone2},{zone3},{zone4},{brightness}\n"
-
-        if self.enek5130_hid_device:
-            if self._set_enek5130_per_zone_color([zone1, zone2, zone3, zone4], brightness):
-                return True
-
-        return self._write_file(
-            "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/per_zone_mode",
-            value
-        )
+        with self.lock:
+            if self.enek5130_hid_device:
+                try:
+                    if self._set_enek5130_per_zone_color(zones, brightness):
+                        return True
+                except Exception as e:
+                    log.warning(f"ENEK5130 per-zone update failed, falling back to sysfs: {e}")
+            return self._write_file(_acer_wmi_path("four_zoned_kb", "per_zone_mode"),
+                                    f"{zone1},{zone2},{zone3},{zone4},{brightness}")
 
     def get_four_zone_mode(self) -> str:
-        """Get four-zone mode configuration"""
         if "four_zone_mode" not in self.available_features:
             return ""
-
-        return self._read_file("/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/four_zone_mode")
+        return self._read_file(_acer_wmi_path("four_zoned_kb", "four_zone_mode"))
 
     def set_four_zone_mode(self, mode: int, speed: int, brightness: int,
                            direction: int, red: int, green: int, blue: int) -> bool:
-        """Set four-zone mode configuration
-        
-        Args:
-            mode: 0-7 (lighting effect type)
-            speed: 0-9 (effect speed)
-            brightness: 0-100 (light intensity)
-            direction: 1-2 (1=right to left, 2=left to right)
-            red, green, blue: 0-255 (RGB color values)
-        """
+        """Set four-zone mode: mode 0-7, speed 0-9, brightness 0-100, direction 1-2, RGB 0-255."""
         if "four_zone_mode" not in self.available_features:
             return False
 
-        # Validate values
-        if not (0 <= mode <= 7):
-            log.error(f"Invalid mode. Must be between 0 and 7: {mode}")
-            return False
+        checks = (("mode", mode, 0, 7), ("speed", speed, 0, 9), ("brightness", brightness, 0, 100),
+                  ("direction", direction, 1, 2), ("red", red, 0, 255), ("green", green, 0, 255),
+                  ("blue", blue, 0, 255))
+        for name, value, lo, hi in checks:
+            if not _is_int(value) or not (lo <= value <= hi):
+                self._set_last_error(f"{name} must be an integer between {lo} and {hi}")
+                log.error(f"Invalid {name}. Must be an integer between {lo} and {hi}: {_short(value)}")
+                return False
 
-        if not (0 <= speed <= 9):
-            log.error(f"Invalid speed. Must be between 0 and 9: {speed}")
-            return False
+        with self.lock:
+            if self.enek5130_hid_device:
+                try:
+                    if mode == 0:
+                        if self._set_enek5130_static_color(red, green, blue, brightness):
+                            return True
+                    elif self._set_enek5130_effect(mode, speed, brightness, direction, red, green, blue):
+                        return True
+                except Exception as e:
+                    log.warning(f"ENEK5130 effect update failed, falling back to sysfs: {e}")
+            return self._write_file(_acer_wmi_path("four_zoned_kb", "four_zone_mode"),
+                                    f"{mode},{speed},{brightness},{direction},{red},{green},{blue}")
 
-        if not (0 <= brightness <= 100):
-            log.error(f"Invalid brightness. Must be between 0 and 100: {brightness}")
-            return False
-
-        if direction not in [1, 2]:
-            log.error(f"Invalid direction. Must be 1 or 2: {direction}")
-            return False
-
-        if not all(0 <= color <= 255 for color in [red, green, blue]):
-            log.error(f"Invalid RGB values. Must be between 0 and 255: {red},{green},{blue}")
-            return False
-
-        value = f"{mode},{speed},{brightness},{direction},{red},{green},{blue}\n"
-
-        if self.enek5130_hid_device:
-            if mode == 0:
-                if self._set_enek5130_static_color(red, green, blue, brightness):
-                    return True
-            elif self._set_enek5130_effect(mode, speed, brightness, direction, red, green, blue):
-                return True
-
-        return self._write_file(
-            "/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/four_zone_mode",
-            value
-        )
+    # ------------------------------------------------------------ summary
+    def get_status(self) -> Dict:
+        return {
+            "laptop_type": self.laptop_type.name,
+            "driver_loaded": self.driver_loaded,
+            "driver_status": self.driver_status,
+            "status_message": self.status_message,
+        }
 
     def get_all_settings(self) -> Dict:
         """Get all DAMX-Daemon settings as a dictionary"""
         settings = {
             "laptop_type": self.laptop_type.name,
             "has_four_zone_kb": self.has_four_zone_kb,
-            "available_features": list(self.available_features),
+            "available_features": sorted(self.available_features),
             "version": VERSION,
             "driver_version": self.get_driver_version(),
-            "modprobe_parameter": self.current_modprobe_param
+            "driver_loaded": self.driver_loaded,
+            "driver_status": self.driver_status,
+            "status_message": self.status_message,
+            "modprobe_parameter": self.get_modprobe_parameter(),
+            "thermal_profile": {
+                "current": self.get_thermal_profile(),
+                "available": self.get_thermal_profile_choices(),
+            },
         }
 
-        # Only include thermal profile if available
-        if "thermal_profile" in self.available_features:
-            settings["thermal_profile"] = {
-                "current": self.get_thermal_profile(),
-                "available": self.get_thermal_profile_choices()
-            }
-        else:
-            # Include an empty entry for compatibility
-            settings["thermal_profile"] = {
-                "current": "",
-                "available": []
-            }
-
-        # Add all other features if available
-        if "backlight_timeout" in self.available_features:
-            settings["backlight_timeout"] = self.get_backlight_timeout()
-
-        if "battery_calibration" in self.available_features:
-            settings["battery_calibration"] = self.get_battery_calibration()
-
-        if "battery_limiter" in self.available_features:
-            settings["battery_limiter"] = self.get_battery_limiter()
-
-        if "boot_animation_sound" in self.available_features:
-            settings["boot_animation_sound"] = self.get_boot_animation_sound()
+        for feature in ("backlight_timeout", "battery_calibration", "battery_limiter",
+                        "boot_animation_sound", "lcd_override", "usb_charging",
+                        "per_zone_mode", "four_zone_mode"):
+            if feature in self.available_features:
+                settings[feature] = getattr(self, "get_" + feature)()
 
         if "fan_speed" in self.available_features:
             cpu_fan, gpu_fan = self.get_fan_speed()
-            settings["fan_speed"] = {
-                "cpu": cpu_fan,
-                "gpu": gpu_fan
-            }
-
-        if "lcd_override" in self.available_features:
-            settings["lcd_override"] = self.get_lcd_override()
-
-        if "usb_charging" in self.available_features:
-            settings["usb_charging"] = self.get_usb_charging()
-
-        if "per_zone_mode" in self.available_features:
-            settings["per_zone_mode"] = self.get_per_zone_mode()
-
-        if "four_zone_mode" in self.available_features:
-            settings["four_zone_mode"] = self.get_four_zone_mode()
+            settings["fan_speed"] = {"cpu": cpu_fan, "gpu": gpu_fan}
+            settings["fan_mode"] = self.get_fan_mode()
 
         return settings
+
+
+class RequestError(Exception):
+    """A request that cannot be served; the message is returned to the client."""
+
+
+class PeerInfo(NamedTuple):
+    pid: int
+    uid: int
+    gid: int
+    privileged: bool
+
+
+def _ok(data=None, message: Optional[str] = None) -> Dict:
+    response = {"success": True, "data": data}
+    if message:
+        response["message"] = message
+    return response
+
+
+def _err(message: str) -> Dict:
+    return {"success": False, "error": message}
+
+
+def _require(params: Dict, name: str):
+    if name not in params:
+        raise RequestError(f"missing required parameter '{name}'")
+    return params[name]
+
+
+def _bool_param(params: Dict, name: str) -> bool:
+    value = _coerce_bool(_require(params, name))
+    if value is None:
+        raise RequestError(f"parameter '{name}' must be a boolean (true/false)")
+    return value
+
+
+def _int_param(params: Dict, name: str, lo: int, hi: int) -> int:
+    value = _require(params, name)
+    if not _is_int(value) or not (lo <= value <= hi):
+        raise RequestError(f"parameter '{name}' must be an integer between {lo} and {hi}")
+    return value
+
+
+def _hex_param(params: Dict, name: str) -> str:
+    value = _require(params, name)
+    if not _is_hex_color(value):
+        raise RequestError(f"parameter '{name}' must be a 6-digit hex color (RRGGBB)")
+    return value
+
+
+def _str_param(params: Dict, name: str) -> str:
+    value = _require(params, name)
+    if not isinstance(value, str) or not value:
+        raise RequestError(f"parameter '{name}' must be a non-empty string")
+    return value
 
 
 class DaemonServer:
     """Unix Socket server for IPC with the GUI client"""
 
-    def __init__(self, manager: DAMXManager):
+    def __init__(self, manager: DAMXManager, max_clients: int = MAX_CLIENTS,
+                 idle_timeout: float = CLIENT_IDLE_TIMEOUT):
         self.manager = manager
         self.socket = None
         self.running = False
-        self.clients = []
+        self.max_clients = max_clients
+        self.idle_timeout = idle_timeout
+        self.clients: List[Tuple[socket.socket, threading.Thread]] = []
+        self._clients_lock = threading.Lock()
+        self._socket_ino = None
 
-    def start(self):
-        """Start the Unix socket server"""
-        # Remove socket if it already exists
-        try:
-            if os.path.exists(SOCKET_PATH):
-                os.unlink(SOCKET_PATH)
-        except OSError as e:
-            log.error(f"Failed to remove existing socket: {e}")
-            return False
+        toggles = {
+            "set_backlight_timeout": ("backlight_timeout", "Backlight timeout"),
+            "set_battery_calibration": ("battery_calibration", "Battery calibration"),
+            "set_battery_limiter": ("battery_limiter", "Battery limiter"),
+            "set_boot_animation_sound": ("boot_animation_sound", "Boot animation sound"),
+            "set_lcd_override": ("lcd_override", "LCD override"),
+        }
+        self._commands: Dict[str, Callable[[Dict, List[Callable]], Dict]] = {
+            "ping": self._cmd_ping,
+            "get_version": self._cmd_get_version,
+            "get_all_settings": self._cmd_get_all_settings,
+            "get_supported_features": self._cmd_get_supported_features,
+            "get_thermal_profile": self._cmd_get_thermal_profile,
+            "set_thermal_profile": self._cmd_set_thermal_profile,
+            "set_fan_speed": self._cmd_set_fan_speed,
+            "set_usb_charging": self._cmd_set_usb_charging,
+            "set_per_zone_mode": self._cmd_set_per_zone_mode,
+            "set_four_zone_mode": self._cmd_set_four_zone_mode,
+            "get_modprobe_parameter": self._cmd_get_modprobe_parameter,
+            "force_nitro_model": self._make_force("nitro_v4"),
+            "force_predator_model": self._make_force("predator_v4"),
+            "force_enable_all": self._make_force("enable_all"),
+            "set_modprobe_parameter_predator": self._make_set_modprobe("predator_v4"),
+            "set_modprobe_parameter_nitro": self._make_set_modprobe("nitro_v4"),
+            "set_modprobe_parameter_enable_all": self._make_set_modprobe("enable_all"),
+            "remove_modprobe_parameter": self._cmd_remove_modprobe_parameter,
+            "restart_daemon": self._cmd_restart_daemon,
+            "restart_drivers_and_daemon": self._cmd_restart_drivers_and_daemon,
+        }
+        for command, (feature, label) in toggles.items():
+            self._commands[command] = self._make_toggle(feature, label)
 
+    # ------------------------------------------------------------ socket setup
+    def _prepare_socket_path(self):
+        """Remove a stale socket; refuse to start if another daemon answers on it."""
+        if not os.path.lexists(SOCKET_PATH):
+            return
+        st = os.lstat(SOCKET_PATH)
+        if stat.S_ISSOCK(st.st_mode):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(1.0)
+            try:
+                probe.connect(SOCKET_PATH)
+            except OSError:
+                pass  # nobody listening: stale
+            else:
+                raise RuntimeError(f"another DAMX daemon is already listening on {SOCKET_PATH}")
+            finally:
+                probe.close()
+        log.info(f"Removing stale socket file {SOCKET_PATH}")
+        os.unlink(SOCKET_PATH)
+
+    def _apply_socket_permissions(self):
         try:
-            self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.socket.bind(SOCKET_PATH)
-            # Ensure socket permissions allow non-root access
+            gid = grp.getgrnam(DAMX_GROUP).gr_gid
+        except KeyError:
+            gid = None
+        if gid is not None:
+            os.chown(SOCKET_PATH, 0, gid)
+            os.chmod(SOCKET_PATH, 0o660)
+            log.info(f"Socket {SOCKET_PATH} is root:{DAMX_GROUP} 0660")
+        else:
             os.chmod(SOCKET_PATH, 0o666)
-            self.socket.listen(5)
-            self.socket.settimeout(1)  # 1 second timeout for clean shutdown
-            self.running = True
+            log.warning(f"Group '{DAMX_GROUP}' does not exist: socket {SOCKET_PATH} is world-accessible (0666). "
+                        f"Privileged commands still require root or membership in {', '.join(PRIVILEGED_GROUPS)}.")
 
-            log.info(f"Server listening on {SOCKET_PATH}")
-
-            # Accept connections in a loop
-            while self.running:
-                try:
-                    client, _ = self.socket.accept()
-                    client_thread = threading.Thread(target=self.handle_client, args=(client,))
-                    client_thread.daemon = True
-                    client_thread.start()
-                    self.clients.append((client, client_thread))
-                except socket.timeout:
-                    # This is expected due to the timeout
-                    continue
-                except Exception as e:
-                    if self.running:  # Only log if not shutting down
-                        log.error(f"Error accepting connection: {e}")
-
-            return True
-
-        except Exception as e:
-            log.error(f"Failed to start server: {e}")
+    def bind(self) -> bool:
+        """Create, bind and listen on the socket. Returns False on failure."""
+        try:
+            self._prepare_socket_path()
+        except (RuntimeError, OSError) as e:
+            log.error(f"Cannot use socket path {SOCKET_PATH}: {e}")
             return False
+
+        old_umask = os.umask(0o177)  # socket is created 0600, permissions fixed below
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.bind(SOCKET_PATH)
+        except OSError as e:
+            sock.close()
+            log.error(f"Failed to bind {SOCKET_PATH}: {e}")
+            return False
+        finally:
+            os.umask(old_umask)
+
+        self.socket = sock
+        try:
+            self._socket_ino = os.lstat(SOCKET_PATH).st_ino
+            self._apply_socket_permissions()
+            sock.listen(self.max_clients)
+            sock.settimeout(1.0)  # periodic wake-up for clean shutdown
+        except OSError as e:
+            log.error(f"Failed to set up socket {SOCKET_PATH}: {e}")
+            self.stop()
+            return False
+        self.running = True
+        return True
+
+    def serve(self) -> bool:
+        """Accept connections until stop() is called."""
+        log.info(f"Server listening on {SOCKET_PATH}")
+        while self.running:
+            try:
+                client, _ = self.socket.accept()
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if not self.running or e.errno in (errno.EBADF, errno.EINVAL):
+                    break
+                log.error(f"Error accepting connection: {e}")
+                continue
+            self._accept_client(client)
+        return True
+
+    def start(self) -> bool:
+        """Bind and serve (blocking)."""
+        if not self.bind():
+            return False
+        return self.serve()
+
+    # ------------------------------------------------------------ clients
+    def _prune_clients_locked(self):
+        self.clients = [(c, t) for (c, t) in self.clients if t.ident is None or t.is_alive()]
+
+    def _accept_client(self, client: socket.socket):
+        client.settimeout(self.idle_timeout)
+        with self._clients_lock:
+            self._prune_clients_locked()
+            full = len(self.clients) >= self.max_clients
+            if not full:
+                thread = threading.Thread(target=self.handle_client, args=(client,),
+                                          name="DAMX-Client", daemon=True)
+                self.clients.append((client, thread))
+        if full:
+            log.warning(f"Rejecting client: {self.max_clients} clients already connected")
+            try:
+                client.sendall(self._encode(_err("too many clients connected")))
+            except OSError:
+                pass
+            client.close()
+            return
+        thread.start()
+
+    def _remove_client(self, client: socket.socket):
+        with self._clients_lock:
+            self.clients = [(c, t) for (c, t) in self.clients if c is not client]
 
     def stop(self):
         """Stop the server and clean up"""
         log.info("Stopping server...")
         self.running = False
-    
-        # Close all client connections
-        for client, _ in self.clients:
+
+        with self._clients_lock:
+            clients = list(self.clients)
+        for client, _ in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 client.close()
-            except:
+            except OSError:
                 pass
-    
-        # Close server socket
+
         if self.socket:
             try:
-                self.socket.close()
-            except:
+                self.socket.shutdown(socket.SHUT_RDWR)  # wakes a blocked accept()
+            except OSError:
                 pass
-    
-        # Clean up socket file
+            try:
+                self.socket.close()
+            except OSError:
+                pass
+
         self.cleanup_socket()
 
     def cleanup_socket(self):
-        """Clean up the socket file"""
+        """Remove the socket file, but only if it is the one we created."""
+        if self._socket_ino is None:
+            return
         try:
-            if os.path.exists(SOCKET_PATH):
+            st = os.lstat(SOCKET_PATH)
+            if st.st_ino == self._socket_ino and stat.S_ISSOCK(st.st_mode):
                 os.unlink(SOCKET_PATH)
                 log.info(f"Removed socket file: {SOCKET_PATH}")
-        except Exception as e:
+        except FileNotFoundError:
+            pass
+        except OSError as e:
             log.error(f"Failed to remove socket file: {e}")
+        self._socket_ino = None
 
+    def _peer_info(self, client_socket: socket.socket) -> PeerInfo:
+        try:
+            pid, uid, gid = get_peer_credentials(client_socket)
+        except OSError as e:
+            log.warning(f"SO_PEERCRED failed: {e}; treating client as unprivileged")
+            return PeerInfo(-1, -1, -1, False)
+        try:
+            privileged = is_privileged_user(uid, gid)
+        except Exception as e:
+            log.warning(f"Privilege check for uid {uid} failed: {e}")
+            privileged = False
+        return PeerInfo(pid, uid, gid, privileged)
 
-    def handle_client(self, client_socket):
-        """Handle communication with a client"""
+    @staticmethod
+    def _encode(response: Dict) -> bytes:
+        # No indent: a response never contains a raw newline.
+        return (json.dumps(response) + "\n").encode("utf-8")
+
+    def _send(self, client_socket: socket.socket, response: Dict):
+        client_socket.sendall(self._encode(response))
+
+    def handle_client(self, client_socket: socket.socket):
+        """Handle communication with a client (newline-delimited JSON)."""
+        peer = self._peer_info(client_socket)
+        buf = b""
         try:
             while self.running:
-                # Receive data from client
-                data = client_socket.recv(4096)
+                client_socket.settimeout(PARTIAL_MESSAGE_TIMEOUT if buf else self.idle_timeout)
+                try:
+                    data = client_socket.recv(65536)
+                except socket.timeout:
+                    if buf:
+                        log.warning("Discarding incomplete or invalid message")
+                        self._send(client_socket, _err("Invalid JSON format"))
+                        buf = b""
+                        continue
+                    log.debug("Closing idle client connection")
+                    break
                 if not data:
                     break
-
-                try:
-                    # Parse JSON request
-                    request = json.loads(data.decode('utf-8'))
-                    command = request.get("command", "")
-                    params = request.get("params", {})
-
-                    # Process command
-                    response = self.process_command(command, params)
-
-                    # Send response
-                    client_socket.sendall(json.dumps(response).encode('utf-8'))
-
-                except json.JSONDecodeError:
-                    log.error("Invalid JSON received")
-                    client_socket.sendall(json.dumps({
-                        "success": False,
-                        "error": "Invalid JSON format"
-                    }).encode('utf-8'))
-                except Exception as e:
-                    log.error(f"Error processing request: {e}")
-                    log.error(traceback.format_exc())
-                    client_socket.sendall(json.dumps({
-                        "success": False,
-                        "error": str(e)
-                    }).encode('utf-8'))
-
-        except Exception as e:
-            if self.running:  # Only log if not shutting down
-                log.error(f"Client connection error: {e}")
+                buf += data
+                buf, keep_open = self._process_buffer(client_socket, buf, peer)
+                if not keep_open:
+                    break
+        except OSError as e:
+            if self.running:
+                log.debug(f"Client connection error: {e}")
         finally:
+            self._remove_client(client_socket)
             try:
                 client_socket.close()
-            except:
+            except OSError:
                 pass
 
-    def process_command(self, command: str, params: Dict) -> Dict:
-        """Process a command from the client"""
-        log.info(f"Processing command: {command} with params: {params}")
+    def _process_buffer(self, client_socket, buf: bytes, peer: PeerInfo) -> Tuple[bytes, bool]:
+        """Handle every complete message in ``buf``; return (remainder, keep_open)."""
+        while True:
+            newline = buf.find(b"\n")
+            if newline < 0:
+                break
+            line, buf = buf[:newline], buf[newline + 1:]
+            if len(line) > MAX_MESSAGE_SIZE:
+                self._send(client_socket, _err(f"message too large (limit {MAX_MESSAGE_SIZE} bytes)"))
+                return b"", False
+            if line.strip():
+                self._handle_line(client_socket, line, peer)
 
+        if not buf:
+            return buf, True
+        if len(buf) > MAX_MESSAGE_SIZE:
+            log.warning("Client exceeded the maximum message size; closing connection")
+            self._send(client_socket, _err(f"message too large (limit {MAX_MESSAGE_SIZE} bytes)"))
+            return b"", False
+        # Legacy clients send JSON without a trailing newline.
+        return self._process_legacy(client_socket, buf, peer), True
+
+    def _process_legacy(self, client_socket, buf: bytes, peer: PeerInfo) -> bytes:
         try:
-            if command == "get_all_settings":
-                settings = self.manager.get_all_settings()
-                return {
-                    "success": True,
-                    "data": settings
-                }
+            text = buf.decode("utf-8")
+        except UnicodeDecodeError:
+            return buf  # maybe a split multibyte char; the partial timeout handles garbage
+        decoder = json.JSONDecoder()
+        idx, length = 0, len(text)
+        while True:
+            while idx < length and text[idx].isspace():
+                idx += 1
+            if idx >= length:
+                return b""
+            try:
+                obj, idx = decoder.raw_decode(text, idx)
+            except json.JSONDecodeError:
+                return text[idx:].encode("utf-8")
+            self._handle_message(client_socket, obj, peer)
 
-            elif command == "get_thermal_profile":
-                # Check if feature is available
-                if "thermal_profile" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Thermal profile is not supported on this device"
-                    }
+    def _handle_line(self, client_socket, line: bytes, peer: PeerInfo):
+        try:
+            obj = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            log.error("Invalid JSON received")
+            self._send(client_socket, _err("Invalid JSON format"))
+            return
+        self._handle_message(client_socket, obj, peer)
 
-                profile = self.manager.get_thermal_profile()
-                choices = self.manager.get_thermal_profile_choices()
-                return {
-                    "success": True,
-                    "data": {
-                        "current": profile,
-                        "available": choices
-                    }
-                }
-
-            elif command == "set_thermal_profile":
-                # Check if feature is available
-                if "thermal_profile" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Thermal profile is not supported on this device"
-                    }
-
-                profile = params.get("profile", "")
-                success = self.manager.set_thermal_profile(profile)
-                return {
-                    "success": success,
-                    "data": {"profile": profile} if success else None,
-                    "error": "Failed to set thermal profile" if not success else None
-                }
-
-            elif command == "set_backlight_timeout":
-                # Check if feature is available
-                if "backlight_timeout" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Backlight timeout is not supported on this device"
-                    }
-
-                enabled = params.get("enabled", False)
-                success = self.manager.set_backlight_timeout(enabled)
-                return {
-                    "success": success,
-                    "data": {"enabled": enabled} if success else None,
-                    "error": "Failed to set backlight timeout" if not success else None
-                }
-
-            elif command == "set_battery_calibration":
-                # Check if feature is available
-                if "battery_calibration" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Battery calibration is not supported on this device"
-                    }
-
-                enabled = params.get("enabled", False)
-                success = self.manager.set_battery_calibration(enabled)
-                return {
-                    "success": success,
-                    "data": {"enabled": enabled} if success else None,
-                    "error": "Failed to set battery calibration" if not success else None
-                }
-
-            elif command == "set_battery_limiter":
-                # Check if feature is available
-                if "battery_limiter" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Battery limiter is not supported on this device"
-                    }
-
-                enabled = params.get("enabled", False)
-                success = self.manager.set_battery_limiter(enabled)
-                return {
-                    "success": success,
-                    "data": {"enabled": enabled} if success else None,
-                    "error": "Failed to set battery limiter" if not success else None
-                }
-
-            elif command == "set_boot_animation_sound":
-                # Check if feature is available
-                if "boot_animation_sound" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Boot animation sound is not supported on this device"
-                    }
-
-                enabled = params.get("enabled", False)
-                success = self.manager.set_boot_animation_sound(enabled)
-                return {
-                    "success": success,
-                    "data": {"enabled": enabled} if success else None,
-                    "error": "Failed to set boot animation sound" if not success else None
-                }
-
-            elif command == "set_fan_speed":
-                # Check if feature is available
-                if "fan_speed" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Fan speed control is not supported on this device"
-                    }
-
-                cpu = params.get("cpu", 0)
-                gpu = params.get("gpu", 0)
-                success = self.manager.set_fan_speed(cpu, gpu)
-                return {
-                    "success": success,
-                    "data": {"cpu": cpu, "gpu": gpu} if success else None,
-                    "error": "Failed to set fan speed" if not success else None
-                }
-
-            elif command == "set_lcd_override":
-                # Check if feature is available
-                if "lcd_override" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "LCD override is not supported on this device"
-                    }
-
-                enabled = params.get("enabled", False)
-                success = self.manager.set_lcd_override(enabled)
-                return {
-                    "success": success,
-                    "data": {"enabled": enabled} if success else None,
-                    "error": "Failed to set LCD override" if not success else None
-                }
-
-            elif command == "set_usb_charging":
-                # Check if feature is available
-                if "usb_charging" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "USB charging control is not supported on this device"
-                    }
-
-                level = params.get("level", 0)
-                success = self.manager.set_usb_charging(level)
-                return {
-                    "success": success,
-                    "data": {"level": level} if success else None,
-                    "error": "Failed to set USB charging" if not success else None
-                }
-
-            elif command == "set_per_zone_mode":
-                # Check if feature is available
-                if "per_zone_mode" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Per-zone keyboard mode is not supported on this device"
-                    }
-
-                zone1 = params.get("zone1", "000000")
-                zone2 = params.get("zone2", "000000")
-                zone3 = params.get("zone3", "000000")
-                zone4 = params.get("zone4", "000000")
-                brightness = params.get("brightness", 100)
-                success = self.manager.set_per_zone_mode(zone1, zone2, zone3, zone4, brightness)
-                return {
-                    "success": success,
-                    "data": {
-                        "zone1": zone1,
-                        "zone2": zone2,
-                        "zone3": zone3,
-                        "zone4": zone4,
-                        "brightness": brightness
-                    } if success else None,
-                    "error": "Failed to set per-zone mode" if not success else None
-                }
-
-            elif command == "set_four_zone_mode":
-                # Check if feature is available
-                if "four_zone_mode" not in self.manager.available_features:
-                    return {
-                        "success": False,
-                        "error": "Four-zone keyboard mode is not supported on this device"
-                    }
-
-                mode = params.get("mode", 0)
-                speed = params.get("speed", 0)
-                brightness = params.get("brightness", 100)
-                direction = params.get("direction", 1)
-                red = params.get("red", 0)
-                green = params.get("green", 0)
-                blue = params.get("blue", 0)
-                success = self.manager.set_four_zone_mode(mode, speed, brightness, direction, red, green, blue)
-                return {
-                    "success": success,
-                    "data": {
-                        "mode": mode,
-                        "speed": speed,
-                        "brightness": brightness,
-                        "direction": direction,
-                        "red": red,
-                        "green": green,
-                        "blue": blue
-                    } if success else None,
-                    "error": "Failed to set four-zone mode" if not success else None
-                }
-
-            elif command == "get_supported_features":
-                return {
-                    "success": True,
-                    "data": {
-                        "available_features": list(self.manager.available_features),
-                        "laptop_type": self.manager.laptop_type.name,
-                        "has_four_zone_kb": self.manager.has_four_zone_kb
-                    }
-                }
-
-            elif command == "get_version":
-                return {
-                    "success": True,
-                    "data": {
-                        "version": VERSION
-                    }
-                }
-            
-            # Force Models and Features
-            elif command == "force_nitro_model":
-                # Force Nitro model into driver
-                success = self.manager._force_model_nitro()
-                if success:
-                    return {
-                        "success": True,
-                        "message": "Successfully forced Nitro model into driver"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to force Nitro model into driver"
-                    }
-                
-            elif command == "force_predator_model":
-                # Force Predator model into driver
-                success = self.manager._force_model_predator()
-                if success:
-                    return {
-                        "success": True,
-                        "message": "Successfully forced Predator model into driver"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to force Predator model into driver (Model may not support it)"
-                    }
-
-            elif command == "force_enable_all":
-                # Force Enable All Features into driver
-                success = self.manager._force_enable_all()
-                if success:
-                    return {
-                        "success": True,
-                        "message": "Successfully forced all features into driver"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to force all features into driver (Model may not support it)"
-                    }
-                
-            elif command == "get_modprobe_parameter":
-                print (self.manager.get_modprobe_parameter())
-                return {
-                    "success": True,
-                    "data": {
-                        "parameter": self.manager.get_modprobe_parameter()
-                    }
-                }
-
-            # Force Model and Parameters Permanantly
-            elif command == "set_modprobe_parameter_predator":
-                # Don't get parameter from params, use the specific value
-                success = self.manager.set_modprobe_parameter("predator_v4")
-                if success:
-                    return {
-                        "success": True,
-                        "data": {"parameter": "predator_v4"}
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to set modprobe parameter to predator_v4"
-                    }
-
-            elif command == "set_modprobe_parameter_nitro":
-                success = self.manager.set_modprobe_parameter("nitro_v4")
-                if success:
-                    return {
-                        "success": True,
-                        "data": {"parameter": "nitro_v4"}
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to set modprobe parameter to nitro_v4"
-                    }
-
-            elif command == "set_modprobe_parameter_enable_all":
-                success = self.manager.set_modprobe_parameter("enable_all")
-                if success:
-                    return {
-                        "success": True,
-                        "data": {"parameter": "enable_all"}
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to set modprobe parameter to enable_all"
-                    }
-
-            elif command == "remove_modprobe_parameter":
-                success = self.manager._remove_modprobe_parameter()
-                if success:
-                    return {
-                        "success": True,
-                        "message": "Successfully removed modprobe parameter"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to remove modprobe parameter"
-                    }
-            
-            elif command == "restart_daemon":
-                # Force Nitro model into driver
-                success = self.manager._restart_daemon()
-                if success:
-                    return {
-                        "success": True,
-                        "message": "Successfully restarted DAMX daemon"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to Restart DAMX daemon (Check logs for details)"
-                    }           
-
-            elif command == "restart_drivers_and_daemon":
-                # Restart linuwu-sense driver and DAMX daemon service
-                success = self.manager._restart_drivers_and_daemon()
-                if success:
-                    return {
-                        "success": True,
-                        "message": "Successfully restarted drivers and daemon"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": "Failed to restart drivers and daemon"
-                    }
+    def _handle_message(self, client_socket, obj, peer: PeerInfo):
+        post_actions: List[Callable] = []
+        if not isinstance(obj, dict):
+            response = _err("Invalid request: expected a JSON object")
+        else:
+            command = obj.get("command")
+            params = obj.get("params", {})
+            if not isinstance(command, str) or not command:
+                response = _err("Invalid request: 'command' must be a non-empty string")
             else:
-                return {
-                    "success": False,
-                    "error": f"Unknown command: {command}"
-                }
+                response = self.process_command(command, params, peer=peer, post_actions=post_actions)
+        try:
+            self._send(client_socket, response)
+        finally:
+            # Restarts etc. run only after the reply has been sent.
+            self._run_post_actions(post_actions)
 
+    @staticmethod
+    def _run_post_actions(actions: List[Callable]):
+        for action in actions:
+            try:
+                action()
+            except Exception:
+                log.error(f"Deferred action failed:\n{traceback.format_exc()}")
+
+    # ------------------------------------------------------------ dispatch
+    def process_command(self, command: str, params: Dict, peer: Optional[PeerInfo] = None,
+                        post_actions: Optional[List[Callable]] = None) -> Dict:
+        """Process a command.  ``peer`` None means an in-process (trusted) caller.
+
+        Actions appended to ``post_actions`` must run after the response has been
+        sent; when the caller passes none they run before returning.
+        """
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return _err("Invalid request: 'params' must be a JSON object")
+
+        if peer is not None and is_privileged_command(command) and not peer.privileged:
+            log.warning(f"Denied privileged command {command} from uid={peer.uid} pid={peer.pid}")
+            return _err(PERMISSION_DENIED_ERROR)
+
+        handler = self._commands.get(command)
+        if handler is None:
+            return _err(f"Unknown command: {command[:64]}")
+
+        log.debug(f"Processing command: {command} with params: {params}")
+        actions: List[Callable] = [] if post_actions is None else post_actions
+        try:
+            response = handler(params, actions)
+        except RequestError as e:
+            return _err(str(e))
         except Exception as e:
             log.error(f"Error processing command {command}: {e}")
             log.error(traceback.format_exc())
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return _err(str(e))
+        if post_actions is None:
+            self._run_post_actions(actions)
+        return response
+
+    def _require_feature(self, feature: str, label: str):
+        if feature not in self.manager.available_features:
+            raise RequestError(f"{label} is not supported on this device")
+
+    def _failure(self, message: str) -> Dict:
+        detail = self.manager.last_error
+        return _err(f"{message}: {detail}" if detail else message)
+
+    def _cmd_ping(self, params, post):
+        return _ok({"pong": True, "version": VERSION})
+
+    def _cmd_get_version(self, params, post):
+        return _ok({"version": VERSION})
+
+    def _cmd_get_all_settings(self, params, post):
+        return _ok(self.manager.get_all_settings())
+
+    def _cmd_get_supported_features(self, params, post):
+        data = {
+            "available_features": sorted(self.manager.available_features),
+            "has_four_zone_kb": self.manager.has_four_zone_kb,
+        }
+        data.update(self.manager.get_status())
+        return _ok(data)
+
+    def _cmd_get_thermal_profile(self, params, post):
+        self._require_feature("thermal_profile", "Thermal profile")
+        return _ok({"current": self.manager.get_thermal_profile(),
+                    "available": self.manager.get_thermal_profile_choices()})
+
+    def _cmd_set_thermal_profile(self, params, post):
+        self._require_feature("thermal_profile", "Thermal profile")
+        profile = _str_param(params, "profile")
+        if self.manager.set_thermal_profile(profile):
+            return _ok({"profile": profile})
+        return self._failure(f"Failed to set thermal profile {_short(profile)}")
+
+    def _make_toggle(self, feature: str, label: str):
+        def handler(params, post):
+            self._require_feature(feature, label)
+            enabled = _bool_param(params, "enabled")
+            if getattr(self.manager, "set_" + feature)(enabled):
+                return _ok({"enabled": enabled})
+            return self._failure(f"Failed to set {label.lower()}")
+        return handler
+
+    def _cmd_set_fan_speed(self, params, post):
+        self._require_feature("fan_speed", "Fan speed control")
+        cpu = _int_param(params, "cpu", 0, 100)
+        gpu = _int_param(params, "gpu", 0, 100)
+        if self.manager.set_fan_speed(cpu, gpu):
+            return _ok({"cpu": cpu, "gpu": gpu})
+        return self._failure("Failed to set fan speed")
+
+    def _cmd_set_usb_charging(self, params, post):
+        self._require_feature("usb_charging", "USB charging control")
+        level = _require(params, "level")
+        if not _is_int(level) or level not in (0, 10, 20, 30):
+            raise RequestError("parameter 'level' must be one of 0, 10, 20, 30")
+        if self.manager.set_usb_charging(level):
+            return _ok({"level": level})
+        return self._failure("Failed to set USB charging")
+
+    def _cmd_set_per_zone_mode(self, params, post):
+        self._require_feature("per_zone_mode", "Per-zone keyboard mode")
+        zones = [_hex_param(params, f"zone{i}") for i in range(1, 5)]
+        brightness = _int_param(params, "brightness", 0, 100)
+        if self.manager.set_per_zone_mode(*zones, brightness):
+            data = {f"zone{i}": z for i, z in enumerate(zones, 1)}
+            data["brightness"] = brightness
+            return _ok(data)
+        return self._failure("Failed to set per-zone mode")
+
+    def _cmd_set_four_zone_mode(self, params, post):
+        self._require_feature("four_zone_mode", "Four-zone keyboard mode")
+        values = {
+            "mode": _int_param(params, "mode", 0, 7),
+            "speed": _int_param(params, "speed", 0, 9),
+            "brightness": _int_param(params, "brightness", 0, 100),
+            "direction": _int_param(params, "direction", 1, 2),
+            "red": _int_param(params, "red", 0, 255),
+            "green": _int_param(params, "green", 0, 255),
+            "blue": _int_param(params, "blue", 0, 255),
+        }
+        if self.manager.set_four_zone_mode(**values):
+            return _ok(values)
+        return self._failure("Failed to set four-zone mode")
+
+    def _cmd_get_modprobe_parameter(self, params, post):
+        return _ok({"parameter": self.manager.get_modprobe_parameter()})
+
+    # Privileged commands: the reply is sent first, the work runs afterwards in
+    # a detached thread (see post_actions).
+    def _schedule(self, post: List[Callable], name: str, func: Callable, *args) -> bool:
+        if self.manager.restart_in_progress:
+            return False
+        post.append(lambda: self.manager.start_background_task(name, func, *args))
+        return True
+
+    def _make_force(self, param: str):
+        def handler(params, post):
+            scheduled = self._schedule(post, f"damx-force-{param}",
+                                       self.manager.reload_driver_and_redetect, (f"{param}=1",), False)
+            message = (f"Reloading linuwu_sense with {param}=1" if scheduled
+                       else "A driver/daemon restart is already in progress")
+            return _ok({"scheduled": scheduled, "parameter": param}, message)
+        return handler
+
+    def _make_set_modprobe(self, param: str):
+        def handler(params, post):
+            if not self.manager.set_modprobe_parameter(param):
+                return self._failure(f"Failed to set modprobe parameter to {param}")
+            scheduled = self._schedule(post, "damx-apply-modprobe",
+                                       self.manager.reload_driver_and_redetect, (), False)
+            return _ok({"parameter": param, "reload_scheduled": scheduled},
+                       f"Persisted {param}; reloading linuwu_sense to apply it")
+        return handler
+
+    def _cmd_remove_modprobe_parameter(self, params, post):
+        if self.manager.remove_modprobe_parameter():
+            return _ok({"parameter": ""}, "Successfully removed modprobe parameter")
+        return self._failure("Failed to remove modprobe parameter")
+
+    def _cmd_restart_daemon(self, params, post):
+        scheduled = self._schedule(post, "damx-restart-daemon", self.manager.restart_daemon)
+        return _ok({"scheduled": scheduled},
+                   "Restarting DAMX daemon" if scheduled else "A driver/daemon restart is already in progress")
+
+    def _cmd_restart_drivers_and_daemon(self, params, post):
+        scheduled = self._schedule(post, "damx-restart-drivers",
+                                   self.manager.reload_driver_and_redetect, (), True)
+        return _ok({"scheduled": scheduled},
+                   "Restarting drivers and daemon" if scheduled
+                   else "A driver/daemon restart is already in progress")
 
 
 class DAMXDaemon:
     """Main daemon class that manages the lifecycle"""
 
-    def __init__(self):
+    def __init__(self, verbose: bool = False):
         self.running = False
+        self.verbose = verbose
         self.manager = None
         self.server = None
         self.config = None
+        self.power_monitor = None
+        self._wrote_pid = False
 
-    def load_config(self):
-        """Load configuration from file"""
+    @staticmethod
+    def _default_config() -> configparser.ConfigParser:
         config = configparser.ConfigParser()
+        config.read_dict(DEFAULT_CONFIG)
+        return config
 
-        # Create default config if it doesn't exist
-        if not os.path.exists(CONFIG_PATH):
-            log.info(f"Creating default config at {CONFIG_PATH}")
-            config['General'] = {
-                'LogLevel': 'INFO',
-                'AutoDetectFeatures': 'True'
-            }
-
-            # Create config directory if it doesn't exist
+    def _write_default_config(self, config: configparser.ConfigParser):
+        try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-
-            # Write default config
             with open(CONFIG_PATH, 'w') as f:
                 config.write(f)
+        except OSError as e:
+            log.warning(f"Could not write default config {CONFIG_PATH}: {e}")
+
+    def load_config(self):
+        """Load configuration; a corrupt file is backed up and replaced by defaults."""
+        config = self._default_config()
+
+        if not os.path.exists(CONFIG_PATH):
+            log.info(f"Creating default config at {CONFIG_PATH}")
+            self._write_default_config(config)
         else:
-            # Load existing config
-            config.read(CONFIG_PATH)
+            try:
+                config.read(CONFIG_PATH, encoding="utf-8")
+            except (configparser.Error, UnicodeDecodeError) as e:
+                backup = CONFIG_PATH + ".bak"
+                log.error(f"Config file {CONFIG_PATH} is corrupt ({e}); backing it up to {backup} "
+                          f"and using defaults")
+                try:
+                    os.replace(CONFIG_PATH, backup)
+                except OSError as be:
+                    log.error(f"Could not back up corrupt config: {be}")
+                config = self._default_config()
+                self._write_default_config(config)
 
         self.config = config
 
-        # Set log level from config
-        if 'General' in config and 'LogLevel' in config['General']:
-            log_level = config['General']['LogLevel'].upper()
-            if log_level in ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'):
-                #log.setLevel(getattr(logging, log_level))
-                log.setLevel(logging.DEBUG)
-                
-                log.info(f"Log level set to {log_level}")
-
+        level = config.get("General", "LogLevel", fallback="INFO").strip().upper()
+        if level not in LOG_LEVELS:
+            log.warning(f"Invalid LogLevel {level!r} in config; using INFO")
+            level = "INFO"
+        if self.verbose:
+            level = "DEBUG"
+        log.setLevel(getattr(logging, level))
+        log.info(f"Log level set to {level}")
         return config
 
     def setup(self):
         """Set up the daemon"""
-        # Load configuration first
-        self.load_config()
+        try:
+            self.load_config()
+        except Exception as e:
+            log.error(f"Failed to load config, using defaults: {e}")
+            self.config = self._default_config()
 
         try:
-            # Initialize DAMXManager
             self.manager = DAMXManager()
             log.info(f"Driver Version: {self.manager.get_driver_version()}")
-
-            # Initialize keyboard monitor early
-            # self.keyboard_monitor = KeyboardMonitor(
-            #     target_keycode=425, 
-            #     command_to_run="DAMX",  # Updated command
-            #     logger=log
-            # )
-            # kb_success = self.keyboard_monitor.start_monitoring()
-            
-            # if not kb_success:
-            #     log.error("Failed to start keyboard monitoring")
-            #     # Don't return False here - continue with reduced functionality
-
-            # Initialize power monitor (started in run())
             self.power_monitor = PowerSourceDetector(self.manager)
-
-            # Log detected features
-            features_str = ", ".join(sorted(self.manager.available_features))
-            log.info(f"Detected features: {features_str}")
-
+            self.manager.power_monitor = self.power_monitor
             return True
         except Exception as e:
             log.error(f"Failed to set up daemon: {e}")
             log.error(traceback.format_exc())
             return False
-    
 
+    def _write_pid_file(self):
+        try:
+            fd = os.open(PID_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            self._wrote_pid = True
+        except OSError as e:
+            log.warning(f"Could not write PID file {PID_FILE}: {e}")
 
     def run(self):
-        """Run the daemon"""
-        # Write PID file
-        with open(PID_FILE, 'w') as f:
-            f.write(str(os.getpid()))
+        """Run the daemon. Exits with status 1 on fatal errors."""
+        self.server = DaemonServer(self.manager)
+        if not self.server.bind():
+            log.critical("Could not start the socket server; exiting")
+            self.cleanup()
+            sys.exit(1)
 
-        # Set up signal handlers
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        signal.signal(signal.SIGINT, self.signal_handler)
+        self._write_pid_file()
+        for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            signum = getattr(signal, name, None)
+            if signum is not None:
+                signal.signal(signum, self.signal_handler)
 
-        # if self.keyboard_monitor:
-        #     success = self.keyboard_monitor.start_monitoring()
-        #     if success:
-        #         log.info("Keyboard monitoring started successfully")
-        #     else:
-        #         log.warning("Failed to start keyboard monitoring")
-
-        # Set up and run the server
+        exit_code = 0
         try:
             self.running = True
-            self.server = DaemonServer(self.manager)
-            self.power_monitor.start_monitoring()
-            self.server.start()
-            # Start keyboard monitoring
-            
+            if self.power_monitor:
+                self.power_monitor.start_monitoring()
+            self.server.serve()
         except Exception as e:
             log.error(f"Error running daemon: {e}")
             log.error(traceback.format_exc())
+            exit_code = 1
         finally:
             self.cleanup()
+        if exit_code:
+            sys.exit(exit_code)
 
     def cleanup(self):
         """Clean up resources"""
         log.info("Cleaning up resources...")
-    
-        # Stop server and clean up socket
         if self.server:
             self.server.stop()
-            self.server.cleanup_socket()  # Additional cleanup
-            # Stop keyboard monitoring
-        # if hasattr(self, 'keyboard_monitor') and self.keyboard_monitor:
-        #     self.keyboard_monitor.stop_monitoring()
-        #     log.info("Keyboard monitoring stopped")
-    
         if self.power_monitor:
             self.power_monitor.stop_monitoring()
-    
-        # Remove PID file
-        try:
-            if os.path.exists(PID_FILE):
+        if self._wrote_pid:
+            try:
                 os.unlink(PID_FILE)
-        except:
-            pass
-    
+            except OSError:
+                pass
+            self._wrote_pid = False
         log.info("Daemon stopped")
 
     def signal_handler(self, sig, frame):
-        """Handle termination signals"""
+        """Handle SIGTERM/SIGINT/SIGHUP: clean shutdown."""
         log.info(f"Received signal {sig}, shutting down...")
         self.running = False
         if self.server:
             self.server.running = False
+            if self.server.socket:
+                try:
+                    self.server.socket.shutdown(socket.SHUT_RDWR)  # wake accept() now
+                except OSError:
+                    pass
+
 
 def parse_args():
     """Parse command line arguments"""
@@ -1676,38 +1751,24 @@ def parse_args():
     parser.add_argument('--config', type=str, help=f"Path to config file (default: {CONFIG_PATH})")
     return parser.parse_args()
 
-def signal_handler(self, sig, frame):
-    """Handle termination signals"""
-    log.info(f"Received signal {sig}, shutting down...")
-    self.running = False
-    if self.server:
-        self.server.running = False
-    # Ensure socket is cleaned up
-    if hasattr(self, 'server') and self.server:
-        self.server.cleanup_socket()
 
 def main():
     """Main function"""
     args = parse_args()
 
-    # Set log level based on verbosity
-    if args.verbose:
-        log.setLevel(logging.DEBUG)
-        log.debug("Debug logging enabled")
+    if os.geteuid() != 0:
+        print("This daemon must run as root. Please use sudo or run as root.", file=sys.stderr)
+        sys.exit(1)
 
-    # Use custom config path if provided
     global CONFIG_PATH
     if args.config:
         CONFIG_PATH = args.config
 
-    daemon = DAMXDaemon()
-    if daemon.setup():
-        daemon.run()
-    else:
+    daemon = DAMXDaemon(verbose=args.verbose or args.debug)
+    if not daemon.setup():
         log.error("Failed to set up daemon, exiting...")
         sys.exit(1)
-
-    
+    daemon.run()
 
 
 if __name__ == "__main__":

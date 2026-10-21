@@ -35,6 +35,7 @@
         <AvaloniaResource Include="Assets\Fonts\OpenSans.ttf"/>
         <AvaloniaResource Include="Assets\Fonts\Oxanium-Bold.ttf"/>
         <AvaloniaResource Include="Assets\Fonts\Oxanium.ttf"/>
+        <AvaloniaResource Include="Assets\Fonts\JetBrainsMono-Regular.ttf"/>
         <None Remove="iconTransparent.png"/>
         <AvaloniaResource Include="iconTransparent.png"/>
         <None Remove="icon.png"/>

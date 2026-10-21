@@ -615,9 +615,9 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         _cpuTempHistory = new ObservableCollection<double>();
         _gpuTempHistory = new ObservableCollection<double>();
 
-        // Initialize series (colours match AccentColor / SuccessColor in App.axaml)
-        var cpuColor = new SKColor(0x3B, 0x9E, 0xFF);
-        var gpuColor = new SKColor(0x3D, 0xD6, 0x8C);
+        // Initialize series (colours match AccentColor / SecondaryColor in App.axaml)
+        var cpuColor = new SKColor(0x9E, 0xF0, 0xC5);
+        var gpuColor = new SKColor(0xE6, 0xF2, 0xEC);
 
         _tempSeries = new ObservableCollection<ISeries>
         {
@@ -662,10 +662,10 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
             {
                 new()
                 {
-                    LabelsPaint = new SolidColorPaint(new SKColor(0x8B, 0x95, 0xA7)),
+                    LabelsPaint = new SolidColorPaint(new SKColor(0x6E, 0x94, 0x83)),
                     TextSize = 12,
                     Labeler = value => $"{value:0}°",
-                    SeparatorsPaint = new SolidColorPaint(new SKColor(0x23, 0x29, 0x35)) { StrokeThickness = 1 }
+                    SeparatorsPaint = new SolidColorPaint(new SKColor(0x1C, 0x2E, 0x25)) { StrokeThickness = 1 }
                 }
             };
         }
@@ -675,7 +675,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     private static LinearGradientPaint AreaFill(SKColor color)
     {
         return new LinearGradientPaint(
-            new[] { color.WithAlpha(70), color.WithAlpha(0) },
+            new[] { color.WithAlpha(55), color.WithAlpha(0) },
             new SKPoint(0.5f, 0),
             new SKPoint(0.5f, 1));
     }

@@ -23,3 +23,10 @@ DAMX-GUI/
 DAMX-Daemon/
 Linuwu-Sense/
 damx_installer_temp/
+
+# Python bytecode, editor backups and IDE per-user state
+__pycache__/
+*.pyc
+*~
+.idea/**/workspace.xml
+DAMM-Daemon/venv/

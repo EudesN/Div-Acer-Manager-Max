@@ -3,6 +3,11 @@
 # DAMX Installer Script
 # This script installs, uninstalls, or updates the DAMX Suite for Acer laptops on Linux
 # Components: Linuwu-Sense (drivers), DAMX-Daemon, and DAMX-GUI
+#
+# Driver source selection (first match wins):
+#   1. $DAMX_DRIVER_DIR
+#   2. ./Linuwu-Sense, if it is Div-Linuwu-Sense (defines DRIVER_VERSION)
+#   3. ../Div-Linuwu-Sense (or ../../Div-Linuwu-Sense from a git checkout)
 
 # Constants
 SCRIPT_VERSION="0.9.0"
@@ -18,10 +23,30 @@ MODULE_SIGNING_CERT="${MODULE_SIGNING_DIR}/DAMX-MOK.der"
 MODULE_SIGNING_REQUIRED=false
 LINUWU_SENSE_DKMS_NAME="linuwu-sense"
 DKMS_SIGNING_CONF="/etc/dkms/framework.conf.d/damx.conf"
+WORKDIR=""
+DRIVER_SOURCE_DIR=""
 
 # Legacy paths for cleanup (uppercase naming convention)
 LEGACY_INSTALL_DIR="/opt/DAMX"
 LEGACY_DAEMON_SERVICE_NAME="DAMX-Daemon.service"
+
+# Paths used by the detection helpers (kept in variables so they can be
+# exercised by a test harness).
+KERNEL_MODULES_DIR="/lib/modules"
+PROC_VERSION_FILE="/proc/version"
+
+# Legacy driver permission config. The driver now ships a udev rule instead;
+# a stale tmpfiles entry makes pacman's tmpfiles hook fail (issue #182).
+LEGACY_TMPFILES_CONF="/etc/tmpfiles.d/linuwu_sense.conf"
+LINUWU_SENSE_UDEV_RULE="/etc/udev/rules.d/99-linuwu-sense.rules"
+
+# Group that may talk to the daemon socket (daemon makes it root:damx 0660).
+DAMX_GROUP="damx"
+DAMX_GROUP_ADDED=false
+REAL_USER=""
+
+# Extra make arguments for the kernel build (LLVM=1 CC=clang on clang kernels).
+DRIVER_BUILD_ARGS=()
 
 # Colors for terminal output
 RED='\033[0;31m'
@@ -36,22 +61,93 @@ pause() {
   read -n 1 -s -r
 }
 
-# Function to check and elevate privileges
-check_root() {
-  if [ "$EUID" -ne 0 ]; then
-    echo -e "${YELLOW}This script requires root privileges.${NC}"
+# ---------------------------------------------------------------------------
+# Kernel / toolchain detection. Defined before anything that calls it
+# (GitHub issues #223/#256: "is_llvm_kernel: command not found").
+# ---------------------------------------------------------------------------
 
-    # Check if sudo is available
-    if command -v sudo &> /dev/null; then
-      echo -e "${BLUE}Attempting to run with sudo...${NC}"
-      exec sudo "$0" "$@"
-      exit $?
-    else
-      echo -e "${RED}Error: sudo not found. Please run this script as root.${NC}"
-      pause
-      exit 1
+# Succeeds when the running kernel was compiled with clang/LLVM, in which case
+# out-of-tree modules must be built with LLVM=1 CC=clang.
+is_llvm_kernel() {
+  local kernel_release
+  local kernel_build
+  local config_file
+
+  kernel_release=$(uname -r)
+  kernel_build="${KERNEL_MODULES_DIR}/${kernel_release}/build"
+
+  # The kernel config is authoritative when it is available.
+  for config_file in "${kernel_build}/.config" "/boot/config-${kernel_release}"; do
+    if [ -r "$config_file" ]; then
+      grep -q '^CONFIG_CC_IS_CLANG=y' "$config_file"
+      return $?
     fi
+  done
+
+  if command -v zgrep &> /dev/null && [ -r /proc/config.gz ]; then
+    zgrep -q '^CONFIG_CC_IS_CLANG=y' /proc/config.gz
+    return $?
   fi
+
+  if [ -r "$PROC_VERSION_FILE" ] && grep -qi 'clang' "$PROC_VERSION_FILE"; then
+    return 0
+  fi
+
+  if [ -r "${kernel_build}/include/generated/compile.h" ] &&
+     grep -qsi 'clang' "${kernel_build}/include/generated/compile.h"; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Prints the package manager in use.
+detect_pkg_manager() {
+  local pm
+  for pm in pacman apt-get dnf yum zypper; do
+    if command -v "$pm" &> /dev/null; then
+      echo "$pm"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Arch: print the headers package matching the running kernel, e.g.
+# linux -> linux-headers, linux-zen -> linux-zen-headers.
+arch_headers_pkg() {
+  local kernel_pkg
+  kernel_pkg=$(pacman -Qoq "/usr/lib/modules/$(uname -r)/vmlinuz" 2> /dev/null | head -n 1)
+  if [ -z "$kernel_pkg" ]; then
+    return 1
+  fi
+  echo "${kernel_pkg}-headers"
+}
+
+# Succeeds when <dir>/src/linuwu_sense.c defines DRIVER_VERSION, which only
+# the Div-Linuwu-Sense fork (with the ANV15-51 fixes) does.
+has_driver_version_define() {
+  grep -qE '^[[:space:]]*#define[[:space:]]+DRIVER_VERSION[[:space:]]+"' "$1/src/linuwu_sense.c" 2> /dev/null
+}
+
+# Prints the DRIVER_VERSION of the driver source in <dir> (fallback "1.0").
+get_driver_version() {
+  local version
+  version=$(sed -n -E 's/^[[:space:]]*#define[[:space:]]+DRIVER_VERSION[[:space:]]+"([^"]+)".*/\1/p' "$1/src/linuwu_sense.c" 2> /dev/null | head -n 1)
+  echo "${version:-1.0}"
+}
+
+# Determine the unprivileged user that invoked the installer.
+resolve_real_user() {
+  local user="${SUDO_USER:-}"
+
+  if [ -z "$user" ] || [ "$user" = "root" ]; then
+    user=$(logname 2> /dev/null || true)
+  fi
+  if [ "$user" = "root" ] || { [ -n "$user" ] && ! id -u "$user" > /dev/null 2>&1; }; then
+    user=""
+  fi
+  echo "$user"
 }
 
 print_banner() {
@@ -61,202 +157,6 @@ print_banner() {
   echo -e "${BLUE}    Acer Laptop WMI Controls for Linux  ${NC}"
   echo -e "${BLUE}==========================================${NC}"
   echo ""
-}
-
-# Function to detect and clean up legacy installations
-cleanup_legacy_installation() {
-  echo -e "${YELLOW}Checking for legacy installations...${NC}"
-  local cleanup_performed=false
-
-  # Check for legacy service file (uppercase naming)
-  if [ -f "${SYSTEMD_DIR}/${LEGACY_DAEMON_SERVICE_NAME}" ]; then
-    echo -e "${BLUE}Found legacy service file: ${LEGACY_DAEMON_SERVICE_NAME}${NC}"
-
-    # Stop the legacy service if it's running
-    if systemctl is-active --quiet ${LEGACY_DAEMON_SERVICE_NAME} 2>/dev/null; then
-      echo "Stopping legacy service..."
-      systemctl stop ${LEGACY_DAEMON_SERVICE_NAME}
-    fi
-
-    # Disable the legacy service if it's enabled
-    if systemctl is-enabled --quiet ${LEGACY_DAEMON_SERVICE_NAME} 2>/dev/null; then
-      echo "Disabling legacy service..."
-      systemctl disable ${LEGACY_DAEMON_SERVICE_NAME}
-    fi
-
-    # Remove the legacy service file
-    echo "Removing legacy service file..."
-    rm -f "${SYSTEMD_DIR}/${LEGACY_DAEMON_SERVICE_NAME}"
-    cleanup_performed=true
-  fi
-
-  # Check for legacy installation directory (uppercase naming)
-  if [ -d "${LEGACY_INSTALL_DIR}" ]; then
-    echo -e "${BLUE}Found legacy installation directory: ${LEGACY_INSTALL_DIR}${NC}"
-    echo "Removing legacy installation directory..."
-    rm -rf "${LEGACY_INSTALL_DIR}"
-    cleanup_performed=true
-  fi
-
-  # Check for other potential legacy artifacts
-  local legacy_artifacts=(
-    "/usr/local/bin/DAMX-Daemon"
-    "/usr/share/applications/DAMX.desktop"
-    "/usr/share/icons/hicolor/256x256/apps/DAMX.png"
-  )
-
-  for artifact in "${legacy_artifacts[@]}"; do
-    if [ -f "$artifact" ] || [ -d "$artifact" ]; then
-      echo "Removing legacy artifact: $artifact"
-      rm -rf "$artifact"
-      cleanup_performed=true
-    fi
-  done
-
-  # Reload systemd daemon if any service changes were made
-  if [ "$cleanup_performed" = true ]; then
-    echo "Reloading systemd daemon configuration..."
-    systemctl daemon-reload
-    echo -e "${GREEN}Legacy installation cleanup completed.${NC}"
-  else
-    echo -e "${GREEN}No legacy installations found.${NC}"
-  fi
-
-  return 0
-}
-
-# Function to perform comprehensive cleanup for uninstall/reinstall
-comprehensive_cleanup() {
-  echo -e "${YELLOW}Performing comprehensive cleanup...${NC}"
-
-  # Stop and disable current daemon service
-  if systemctl is-active --quiet ${DAEMON_SERVICE_NAME} 2>/dev/null; then
-    echo "Stopping current DAMX-Daemon service..."
-    systemctl stop ${DAEMON_SERVICE_NAME}
-  fi
-
-  if systemctl is-enabled --quiet ${DAEMON_SERVICE_NAME} 2>/dev/null; then
-    echo "Disabling current DAMX-Daemon service..."
-    systemctl disable ${DAEMON_SERVICE_NAME}
-  fi
-
-  # Remove current service file
-  if [ -f "${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME}" ]; then
-    echo "Removing current service file..."
-    rm -f "${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME}"
-  fi
-
-  # Clean up nitro key detection service
-  cleanup_nitro_service
-
-  # Clean up legacy installations
-  cleanup_legacy_installation
-
-  # Remove current installed files
-  echo "Removing current installation files..."
-  rm -rf ${INSTALL_DIR}
-  rm -f ${BIN_DIR}/DAMX
-  rm -f ${DESKTOP_FILE_DIR}/damx.desktop
-  rm -f ${ICON_DIR}/damx.png
-
-  # Uninstall drivers if Linuwu-Sense folder exists
-  if [ -d "Linuwu-Sense" ]; then
-    echo "Uninstalling drivers..."
-    cd Linuwu-Sense
-    if [ -f "Makefile" ]; then
-      make uninstall 2>/dev/null || true
-    fi
-    cd ..
-  fi
-  unregister_linuwu_sense_dkms
-  rm -f "$DKMS_SIGNING_CONF"
-
-  # Remove nitro key configuration
-  rm -rf /etc/damx
-
-  # Final systemd daemon reload
-  systemctl daemon-reload
-
-  echo -e "${GREEN}Comprehensive cleanup completed.${NC}"
-  return 0
-}
-
-# Function to clean up nitro key detection service
-cleanup_nitro_service() {
-  echo -e "${YELLOW}Cleaning up Nitro Key Detection Service...${NC}"
-  
-  NITRO_SERVICE_NAME="nitro-key-detection.service"
-  
-  # Stop the service if it's running
-  if systemctl is-active --quiet ${NITRO_SERVICE_NAME} 2>/dev/null; then
-    echo "Stopping ${NITRO_SERVICE_NAME}..."
-    systemctl stop ${NITRO_SERVICE_NAME}
-  fi
-  
-  # Disable the service if it's enabled
-  if systemctl is-enabled --quiet ${NITRO_SERVICE_NAME} 2>/dev/null; then
-    echo "Disabling ${NITRO_SERVICE_NAME}..."
-    systemctl disable ${NITRO_SERVICE_NAME}
-  fi
-  
-  # Remove the service file
-  if [ -f "${SYSTEMD_DIR}/${NITRO_SERVICE_NAME}" ]; then
-    echo "Removing ${NITRO_SERVICE_NAME} file..."
-    rm -f "${SYSTEMD_DIR}/${NITRO_SERVICE_NAME}"
-  fi
-  
-  # Remove the nitro key detection script
-  if [ -f "/usr/local/bin/nitro-key-detection.sh" ]; then
-    echo "Removing nitro-key-detection.sh script..."
-    rm -f "/usr/local/bin/nitro-key-detection.sh"
-  fi
-  
-  # Remove nitro key configuration
-  if [ -f "/etc/damx/nitro_key.conf" ]; then
-    echo "Removing nitro_key.conf configuration..."
-    rm -f "/etc/damx/nitro_key.conf"
-  fi
-  
-  echo -e "${GREEN}Nitro Key Detection Service cleanup completed.${NC}"
-}
-
-# Detect the compiler used to build the running kernel.
-is_llvm_kernel() {
-  local kernel_release
-  local kernel_build
-  local config_file
-
-  kernel_release=$(uname -r)
-  kernel_build="/lib/modules/${kernel_release}/build"
-
-  for config_file in "/boot/config-${kernel_release}" "${kernel_build}/.config"; do
-    if [ -r "$config_file" ] && grep -q '^CONFIG_CC_IS_CLANG=y' "$config_file"; then
-      return 0
-    fi
-  done
-
-  if command -v zgrep &> /dev/null &&
-     [ -r /proc/config.gz ] &&
-     zgrep -q '^CONFIG_CC_IS_CLANG=y' /proc/config.gz; then
-    return 0
-  fi
-
-  if grep -qsiE 'clang|llvm' /proc/version 2>/dev/null; then
-    return 0
-  fi
-
-  if [ -r "${kernel_build}/include/generated/compile.h" ] &&
-     grep -qsiE 'clang|llvm' "${kernel_build}/include/generated/compile.h"; then
-    return 0
-  fi
-
-  # CachyOS kernels are LLVM-built by default. Keep this fallback for
-  # installations where the running kernel does not expose its build config.
-  if [ -r /etc/os-release ] && grep -qi 'cachyos' /etc/os-release; then
-    return 0
-  fi
-
-  return 1
 }
 
 secure_boot_enabled() {
@@ -370,7 +270,7 @@ prepare_secure_boot_signing() {
 
   if [ ! -t 0 ]; then
     echo -e "${RED}Error: MOK enrollment requires an interactive terminal.${NC}"
-    echo "Run setup.sh directly from a terminal, then reboot and enroll the DAMX key."
+    echo "Run this installer directly from a terminal, then reboot and enroll the DAMX key."
     return 1
   fi
 
@@ -415,26 +315,6 @@ sign_driver_module() {
       return 1
     fi
     echo -e "${GREEN}Module signed by: ${signer}${NC}"
-  fi
-}
-
-# Install build dependencies based on distribution
-install_build_deps() {
-  if command -v pacman &> /dev/null; then
-    # Arch-based (including CachyOS, Manjaro, EndeavourOS)
-    pacman -S --needed --noconfirm base-devel
-    if is_llvm_kernel; then
-      pacman -S --needed --noconfirm clang llvm lld
-    fi
-  elif command -v apt-get &> /dev/null; then
-    apt-get update && apt-get install -y build-essential
-  elif command -v dnf &> /dev/null; then
-    dnf install -y gcc make kernel-devel
-  elif command -v zypper &> /dev/null; then
-    zypper install -y gcc make kernel-devel
-  else
-    echo -e "${RED}Error: Could not detect a supported package manager.${NC}"
-    return 1
   fi
 }
 
@@ -501,21 +381,215 @@ mok_certificate="${MODULE_SIGNING_CERT}"
 EOL
 }
 
+# Function to detect and clean up legacy installations
+cleanup_legacy_installation() {
+  echo -e "${YELLOW}Checking for legacy installations...${NC}"
+  local cleanup_performed=false
+  local artifact
+
+  # Check for legacy service file (uppercase naming)
+  if [ -f "${SYSTEMD_DIR}/${LEGACY_DAEMON_SERVICE_NAME}" ]; then
+    echo -e "${BLUE}Found legacy service file: ${LEGACY_DAEMON_SERVICE_NAME}${NC}"
+
+    if systemctl is-active --quiet "${LEGACY_DAEMON_SERVICE_NAME}" 2>/dev/null; then
+      echo "Stopping legacy service..."
+      systemctl stop "${LEGACY_DAEMON_SERVICE_NAME}"
+    fi
+
+    if systemctl is-enabled --quiet "${LEGACY_DAEMON_SERVICE_NAME}" 2>/dev/null; then
+      echo "Disabling legacy service..."
+      systemctl disable "${LEGACY_DAEMON_SERVICE_NAME}"
+    fi
+
+    echo "Removing legacy service file..."
+    rm -f "${SYSTEMD_DIR}/${LEGACY_DAEMON_SERVICE_NAME}"
+    cleanup_performed=true
+  fi
+
+  # Check for legacy installation directory (uppercase naming)
+  if [ -d "${LEGACY_INSTALL_DIR}" ]; then
+    echo -e "${BLUE}Found legacy installation directory: ${LEGACY_INSTALL_DIR}${NC}"
+    echo "Removing legacy installation directory..."
+    rm -rf "${LEGACY_INSTALL_DIR}"
+    cleanup_performed=true
+  fi
+
+  # Check for other potential legacy artifacts
+  local legacy_artifacts=(
+    "/usr/local/bin/DAMX-Daemon"
+    "/usr/share/applications/DAMX.desktop"
+    "/usr/share/icons/hicolor/256x256/apps/DAMX.png"
+    "${LEGACY_TMPFILES_CONF}"
+  )
+
+  for artifact in "${legacy_artifacts[@]}"; do
+    if [ -f "$artifact" ] || [ -d "$artifact" ]; then
+      echo "Removing legacy artifact: $artifact"
+      rm -rf "$artifact"
+      cleanup_performed=true
+    fi
+  done
+
+  if [ "$cleanup_performed" = true ]; then
+    echo "Reloading systemd daemon configuration..."
+    systemctl daemon-reload
+    echo -e "${GREEN}Legacy installation cleanup completed.${NC}"
+  else
+    echo -e "${GREEN}No legacy installations found.${NC}"
+  fi
+
+  return 0
+}
+
+# Make sure the toolchain, DKMS and the headers for the *running* kernel are
+# present. Previously headers were only installed when `make` was missing, so
+# Arch systems with base-devel but no headers could never build the driver.
+ensure_build_env() {
+  local kernel_release
+  local kbuild
+  local pm
+  local headers_pkg
+  local pkgs=()
+
+  kernel_release=$(uname -r)
+  kbuild="${KERNEL_MODULES_DIR}/${kernel_release}/build"
+  pm=$(detect_pkg_manager || true)
+
+  echo -e "${YELLOW}Checking build environment for kernel ${kernel_release}...${NC}"
+
+  case "$pm" in
+    pacman)
+      # Always make sure dkms + matching headers are installed on Arch, so
+      # pacman's dkms hook rebuilds the module on every kernel update.
+      pkgs=(base-devel dkms)
+      if headers_pkg=$(arch_headers_pkg); then
+        pkgs+=("$headers_pkg")
+      else
+        echo -e "${YELLOW}Warning: could not find the package that owns the running kernel; install its headers package manually.${NC}"
+      fi
+      echo "Installing (if needed): ${pkgs[*]}"
+      pacman -S --needed --noconfirm "${pkgs[@]}" ||
+        echo -e "${YELLOW}Warning: pacman could not install ${pkgs[*]}.${NC}"
+      ;;
+    apt-get)
+      if [ ! -d "$kbuild" ] || ! command -v make &> /dev/null || ! command -v dkms &> /dev/null; then
+        apt-get update && apt-get install -y "linux-headers-${kernel_release}" dkms build-essential ||
+          echo -e "${YELLOW}Warning: apt-get could not install the build dependencies.${NC}"
+      fi
+      ;;
+    dnf|yum)
+      if [ ! -d "$kbuild" ] || ! command -v make &> /dev/null || ! command -v dkms &> /dev/null; then
+        "$pm" install -y "kernel-devel-${kernel_release}" dkms gcc make ||
+          echo -e "${YELLOW}Warning: ${pm} could not install the build dependencies.${NC}"
+      fi
+      ;;
+    zypper)
+      if [ ! -d "$kbuild" ] || ! command -v make &> /dev/null || ! command -v dkms &> /dev/null; then
+        zypper install -y kernel-devel dkms gcc make ||
+          echo -e "${YELLOW}Warning: zypper could not install the build dependencies.${NC}"
+      fi
+      ;;
+    *)
+      echo -e "${YELLOW}Warning: no supported package manager found; build dependencies must already be installed.${NC}"
+      ;;
+  esac
+
+  if [ ! -d "$kbuild" ]; then
+    echo -e "${RED}Error: kernel headers for the running kernel (${kernel_release}) are missing: ${kbuild}${NC}"
+    if [ ! -d "${KERNEL_MODULES_DIR}/${kernel_release}" ]; then
+      echo "The running kernel's modules directory is gone, so the kernel was probably"
+      echo "updated since the last boot. Reboot into the new kernel and run the installer again."
+    else
+      echo "Install the headers package for your kernel and run the installer again:"
+      echo "  Arch:          sudo pacman -S <kernel-package>-headers   (e.g. linux-headers, linux-zen-headers)"
+      echo "  Debian/Ubuntu: sudo apt-get install linux-headers-${kernel_release}"
+      echo "  Fedora:        sudo dnf install kernel-devel-${kernel_release}"
+    fi
+    return 1
+  fi
+
+  if is_llvm_kernel; then
+    echo -e "${YELLOW}Detected LLVM/clang-compiled kernel, using clang...${NC}"
+    DRIVER_BUILD_ARGS=(LLVM=1 CC=clang)
+    if ! command -v clang &> /dev/null || ! command -v ld.lld &> /dev/null; then
+      case "$pm" in
+        pacman) pacman -S --needed --noconfirm clang llvm lld ;;
+        apt-get) apt-get install -y clang llvm lld ;;
+        dnf|yum|zypper) "$pm" install -y clang llvm lld ;;
+      esac
+    fi
+    if ! command -v clang &> /dev/null; then
+      echo -e "${RED}Error: the kernel was built with clang but clang is not installed.${NC}"
+      return 1
+    fi
+  else
+    DRIVER_BUILD_ARGS=()
+  fi
+
+  if ! command -v make &> /dev/null; then
+    echo -e "${RED}Error: 'make' is not installed; install your distribution's build tools.${NC}"
+    return 1
+  fi
+
+  if ! command -v dkms &> /dev/null; then
+    echo -e "${YELLOW}Warning: DKMS is not available. The driver will NOT be rebuilt automatically${NC}"
+    echo -e "${YELLOW}after kernel updates; install 'dkms' or rerun this installer after each kernel update.${NC}"
+  fi
+
+  echo -e "${GREEN}Build environment OK (${kbuild}).${NC}"
+  return 0
+}
+
 unregister_linuwu_sense_dkms() {
   local version
 
   if command -v dkms &> /dev/null; then
-    for version in /var/lib/dkms/${LINUWU_SENSE_DKMS_NAME}/*/; do
+    for version in /var/lib/dkms/"${LINUWU_SENSE_DKMS_NAME}"/*/; do
       [ -d "$version" ] || continue
       version=$(basename "$version")
       case "$version" in
         kernel-*|original_module) continue ;;
       esac
-      dkms remove "${LINUWU_SENSE_DKMS_NAME}/${version}" --all > /dev/null 2>&1 || true
+      if ! dkms remove "${LINUWU_SENSE_DKMS_NAME}/${version}" --all > /dev/null 2>&1; then
+        echo -e "${YELLOW}Warning: 'dkms remove ${LINUWU_SENSE_DKMS_NAME}/${version}' failed; removing its tree manually.${NC}"
+        rm -rf "/var/lib/dkms/${LINUWU_SENSE_DKMS_NAME}/${version}"
+      fi
     done
   fi
 
   rm -rf "/usr/src/${LINUWU_SENSE_DKMS_NAME}-"*
+}
+
+# write_dkms_conf <file> <version>
+# Kernels built with clang need LLVM=1 CC=clang. The check is done by DKMS
+# for each kernel it builds for (dkms.conf is sourced by bash with
+# kernel_source_dir set), falling back to what was detected at install time.
+write_dkms_conf() {
+  local conf_file=$1
+  local version=$2
+  local llvm_default=0
+
+  if is_llvm_kernel; then
+    llvm_default=1
+  fi
+
+  cat > "$conf_file" << EOL
+PACKAGE_NAME="${LINUWU_SENSE_DKMS_NAME}"
+PACKAGE_VERSION="${version}"
+BUILT_MODULE_NAME[0]="linuwu_sense"
+BUILT_MODULE_LOCATION[0]="src"
+DEST_MODULE_LOCATION[0]="/kernel/drivers/platform/x86"
+MAKE[0]="make -C \${kernel_source_dir} M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build modules"
+# Generated by the DAMX installer: clang-built kernels need LLVM=1 CC=clang.
+if [ -r "\${kernel_source_dir}/.config" ]; then
+  if grep -q '^CONFIG_CC_IS_CLANG=y' "\${kernel_source_dir}/.config"; then
+    MAKE[0]="\${MAKE[0]} LLVM=1 CC=clang"
+  fi
+elif [ "${llvm_default}" = "1" ]; then
+  MAKE[0]="\${MAKE[0]} LLVM=1 CC=clang"
+fi
+AUTOINSTALL="yes"
+EOL
 }
 
 # Register the patched driver sources with DKMS so the module is rebuilt
@@ -539,8 +613,7 @@ register_linuwu_sense_dkms() {
   configure_dkms_signing || return 1
 
   kernel_release=$(uname -r)
-  version=$(sed -n -E 's/^[[:space:]]*#define[[:space:]]+DRIVER_VERSION[[:space:]]+"([^"]+)".*/\1/p' src/linuwu_sense.c | head -n 1)
-  version=${version:-1.0}
+  version=$(get_driver_version .)
   dkms_src="/usr/src/${LINUWU_SENSE_DKMS_NAME}-${version}"
 
   echo -e "${YELLOW}Registering Linuwu-Sense ${version} with DKMS...${NC}"
@@ -550,15 +623,7 @@ register_linuwu_sense_dkms() {
   cp src/*.c "${dkms_src}/src/" || return 1
   cp src/*.h "${dkms_src}/src/" 2> /dev/null || true
   echo 'obj-m := src/linuwu_sense.o' > "${dkms_src}/Kbuild"
-  cat > "${dkms_src}/dkms.conf" << EOL
-PACKAGE_NAME="${LINUWU_SENSE_DKMS_NAME}"
-PACKAGE_VERSION="${version}"
-BUILT_MODULE_NAME[0]="linuwu_sense"
-BUILT_MODULE_LOCATION[0]="src"
-DEST_MODULE_LOCATION[0]="/kernel/drivers/platform/x86"
-MAKE[0]="make -C \${kernel_source_dir} M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build modules"
-AUTOINSTALL="yes"
-EOL
+  write_dkms_conf "${dkms_src}/dkms.conf" "$version" || return 1
 
   if ! dkms add "${LINUWU_SENSE_DKMS_NAME}/${version}" ||
      ! dkms build "${LINUWU_SENSE_DKMS_NAME}/${version}" -k "$kernel_release"; then
@@ -569,7 +634,7 @@ EOL
   # `make install` left an unversioned copy in the kernel tree, and DKMS
   # refuses to install over an identical module. Keep it as a fallback until
   # the DKMS copy is in place.
-  installed_ko="/lib/modules/${kernel_release}/kernel/drivers/platform/x86/linuwu_sense.ko"
+  installed_ko="${KERNEL_MODULES_DIR}/${kernel_release}/kernel/drivers/platform/x86/linuwu_sense.ko"
   backup_ko="${installed_ko}.damx-backup"
   if [ -f "$installed_ko" ]; then
     mv -f "$installed_ko" "$backup_ko" || return 1
@@ -588,110 +653,198 @@ EOL
   return 0
 }
 
-install_drivers() {
-  local build_args=()
-  local signing_status
+# build_driver <source dir>
+# Builds (and signs, if needed) the driver without touching the installed
+# system, so an update can abort while the old installation still works.
+build_driver() {
+  local src_dir=$1
+  local kernel_release
+  local vermagic
+
+  kernel_release=$(uname -r)
+  echo -e "${YELLOW}Building Linuwu-Sense $(get_driver_version "$src_dir") from ${src_dir}...${NC}"
+
+  ensure_build_env || return 1
+
+  (
+    cd "$src_dir" || exit 1
+
+    patch_linuwu_sense_sources || exit 1
+
+    if ! make clean "${DRIVER_BUILD_ARGS[@]}" || ! make "${DRIVER_BUILD_ARGS[@]}"; then
+      echo -e "${RED}Error: Failed to build Linuwu-Sense drivers${NC}"
+      exit 1
+    fi
+
+    if [ ! -f src/linuwu_sense.ko ]; then
+      echo -e "${RED}Error: build finished but src/linuwu_sense.ko was not produced.${NC}"
+      exit 1
+    fi
+
+    if command -v modinfo &> /dev/null; then
+      vermagic=$(modinfo -F vermagic src/linuwu_sense.ko 2> /dev/null | awk '{print $1}')
+      if [ -n "$vermagic" ] && [ "$vermagic" != "$kernel_release" ]; then
+        echo -e "${RED}Error: built module targets kernel ${vermagic}, but ${kernel_release} is running.${NC}"
+        exit 1
+      fi
+    fi
+
+    if [ "$MODULE_SIGNING_REQUIRED" = true ] &&
+       ! sign_driver_module "src/linuwu_sense.ko"; then
+      echo -e "${RED}Error: Failed to sign Linuwu-Sense for Secure Boot${NC}"
+      exit 1
+    fi
+  ) || return 1
+
+  echo -e "${GREEN}Linuwu-Sense built successfully.${NC}"
+  return 0
+}
+
+# install_built_driver <source dir>  (after build_driver succeeded)
+install_built_driver() {
+  local src_dir=$1
 
   echo -e "${YELLOW}Installing Linuwu-Sense drivers...${NC}"
+  (
+    cd "$src_dir" || exit 1
 
-  if [ ! -d "Linuwu-Sense" ]; then
-    echo -e "${RED}Error: Linuwu-Sense directory not found!${NC}"
-    echo "Please make sure the script is run from the same directory containing Linuwu-Sense folder."
-    pause
-    return 1
-  fi
-
-  cd Linuwu-Sense || return 1
-
-  if ! patch_linuwu_sense_sources; then
-    cd .. || return 1
-    pause
-    return 1
-  fi
-
-  # Install required build dependencies
-  if ! command -v make &> /dev/null; then
-    echo -e "${YELLOW}Installing build tools...${NC}"
-    install_build_deps || {
-      cd .. || return 1
-      return 1
-    }
-  fi
-
-  if [ "$MODULE_SIGNING_REQUIRED" != true ]; then
-    prepare_secure_boot_signing
-    signing_status=$?
-    if [ $signing_status -ne 0 ]; then
-      cd .. || return 1
-      return $signing_status
+    if ! make install "${DRIVER_BUILD_ARGS[@]}"; then
+      echo -e "${RED}Error: Failed to install Linuwu-Sense drivers${NC}"
+      exit 1
     fi
-  fi
 
-  # Build driver with appropriate compiler flags
-  if is_llvm_kernel; then
-    echo -e "${YELLOW}Detected LLVM-compiled kernel, using Clang...${NC}"
-    if ! command -v clang &> /dev/null; then
-      install_build_deps || {
-        cd .. || return 1
-        return 1
-      }
+    # DKMS is the default whenever it is available.
+    if ! register_linuwu_sense_dkms; then
+      echo -e "${YELLOW}Warning: DKMS registration failed; the driver will disappear after the next${NC}"
+      echo -e "${YELLOW}kernel update. Install 'dkms' and rerun this installer after each kernel update.${NC}"
     fi
-    build_args=(LLVM=1 CC=clang)
-  fi
-
-  if ! make clean "${build_args[@]}" || ! make "${build_args[@]}"; then
-    echo -e "${RED}Error: Failed to build Linuwu-Sense drivers${NC}"
-    cd .. || return 1
-    pause
-    return 1
-  fi
-
-  if [ "$MODULE_SIGNING_REQUIRED" = true ] &&
-     ! sign_driver_module "src/linuwu_sense.ko"; then
-    echo -e "${RED}Error: Failed to sign Linuwu-Sense for Secure Boot${NC}"
-    cd .. || return 1
-    pause
-    return 1
-  fi
-
-  if ! make install "${build_args[@]}"; then
-    echo -e "${RED}Error: Failed to install Linuwu-Sense drivers${NC}"
-    cd .. || return 1
-    pause
-    return 1
-  fi
-
-  if ! register_linuwu_sense_dkms; then
-    echo -e "${YELLOW}Warning: DKMS registration failed; rerun this installer after each kernel update.${NC}"
-  fi
+  ) || return 1
 
   echo -e "${GREEN}Linuwu-Sense drivers installed successfully!${NC}"
-  cd .. || return 1
   return 0
+}
+
+# uninstall_drivers [source dir]
+# Runs the driver's own `make uninstall` when a source tree is available
+# (logging, not hiding, its errors), then removes everything by hand so the
+# module, .ko and DKMS entry are gone even if `make uninstall` failed.
+uninstall_drivers() {
+  local src_dir=${1:-}
+  local output
+  local ko
+  local unit="linuwu_sense.service"
+
+  echo "Uninstalling Linuwu-Sense drivers..."
+
+  if [ -n "$src_dir" ] && [ -f "${src_dir}/Makefile" ]; then
+    if ! output=$(cd "$src_dir" && make uninstall 2>&1); then
+      echo -e "${YELLOW}Warning: 'make uninstall' reported errors (continuing with manual cleanup):${NC}"
+    fi
+    if [ -n "$output" ]; then
+      printf '%s\n' "$output" | sed 's/^/  [make uninstall] /'
+    fi
+  else
+    echo "No driver source tree available; performing manual driver cleanup."
+  fi
+
+  unregister_linuwu_sense_dkms
+
+  if [ -d /sys/module/linuwu_sense ]; then
+    if ! rmmod linuwu_sense 2> /dev/null && ! modprobe -r linuwu_sense; then
+      echo -e "${YELLOW}Warning: could not unload linuwu_sense (in use?). It will be gone after a reboot.${NC}"
+    fi
+  fi
+
+  for ko in "${KERNEL_MODULES_DIR}"/*/kernel/drivers/platform/x86/linuwu_sense.ko \
+            "${KERNEL_MODULES_DIR}"/*/kernel/drivers/platform/x86/linuwu_sense.ko.damx-backup; do
+    if [ -e "$ko" ]; then
+      echo "Removing $ko"
+      rm -f "$ko"
+    fi
+  done
+
+  if systemctl is-enabled --quiet "$unit" 2> /dev/null || systemctl is-active --quiet "$unit" 2> /dev/null; then
+    systemctl disable --now "$unit" 2> /dev/null || true
+  fi
+  rm -f "${SYSTEMD_DIR}/${unit}" \
+        /etc/modules-load.d/linuwu_sense.conf \
+        /etc/modprobe.d/blacklist-acer_wmi.conf \
+        "$LEGACY_TMPFILES_CONF" \
+        "$LINUWU_SENSE_UDEV_RULE"
+  if command -v udevadm &> /dev/null; then
+    udevadm control --reload 2> /dev/null || true
+  fi
+  depmod -a 2> /dev/null || true
+  modprobe acer_wmi 2> /dev/null || true
+}
+
+# The daemon makes its socket root:damx 0660 when the group exists.
+setup_damx_group() {
+  if ! getent group "$DAMX_GROUP" > /dev/null; then
+    echo "Creating system group '${DAMX_GROUP}'..."
+    if ! groupadd --system "$DAMX_GROUP"; then
+      echo -e "${RED}Error: could not create group '${DAMX_GROUP}'.${NC}"
+      return 1
+    fi
+  fi
+
+  if [ -z "$REAL_USER" ]; then
+    echo -e "${YELLOW}Warning: could not determine which user should use DAMX.${NC}"
+    echo -e "${YELLOW}Add it to the group manually: sudo usermod -aG ${DAMX_GROUP} <user>${NC}"
+    return 0
+  fi
+
+  if id -nG "$REAL_USER" | tr ' ' '\n' | grep -qx "$DAMX_GROUP"; then
+    echo "User ${REAL_USER} is already in group '${DAMX_GROUP}'."
+    return 0
+  fi
+
+  if ! usermod -aG "$DAMX_GROUP" "$REAL_USER"; then
+    echo -e "${RED}Error: could not add ${REAL_USER} to group '${DAMX_GROUP}'.${NC}"
+    return 1
+  fi
+  echo "Added ${REAL_USER} to group '${DAMX_GROUP}'."
+  DAMX_GROUP_ADDED=true
+}
+
+print_group_note() {
+  if [ "$DAMX_GROUP_ADDED" = true ]; then
+    echo ""
+    echo -e "${YELLOW}IMPORTANT: ${REAL_USER} was added to the '${DAMX_GROUP}' group.${NC}"
+    echo -e "${YELLOW}Log out and back in (or run 'newgrp ${DAMX_GROUP}' in a terminal) before${NC}"
+    echo -e "${YELLOW}the DAMX GUI can connect to the daemon.${NC}"
+  fi
+}
+
+print_group_removal_note() {
+  if getent group "$DAMX_GROUP" > /dev/null; then
+    echo -e "${BLUE}The '${DAMX_GROUP}' group was left in place. To remove it: sudo groupdel ${DAMX_GROUP}${NC}"
+  fi
 }
 
 install_daemon() {
   echo -e "${YELLOW}Installing DAMX-Daemon...${NC}"
 
-  if [ ! -d "DAMX-Daemon" ]; then
-    echo -e "${RED}Error: DAMX-Daemon directory not found!${NC}"
-    echo "Please make sure the script is run from the same directory containing DAMX-Daemon folder."
+  if [ ! -f "DAMX-Daemon/DAMX-Daemon" ]; then
+    echo -e "${RED}Error: DAMX-Daemon/DAMX-Daemon not found!${NC}"
+    echo "Please make sure the installer is run from the directory containing the DAMX-Daemon folder."
     pause
     return 1
   fi
 
-  # Create installation directory
-  mkdir -p ${INSTALL_DIR}/daemon
+  if ! mkdir -p "${INSTALL_DIR}/daemon" ||
+     ! cp -f DAMX-Daemon/DAMX-Daemon "${INSTALL_DIR}/daemon/" ||
+     ! chmod 755 "${INSTALL_DIR}/daemon/DAMX-Daemon"; then
+    echo -e "${RED}Error: failed to copy DAMX-Daemon to ${INSTALL_DIR}/daemon; service not enabled.${NC}"
+    return 1
+  fi
 
-  # Copy daemon binary
-  cp -f DAMX-Daemon/DAMX-Daemon ${INSTALL_DIR}/daemon/
-  chmod +x ${INSTALL_DIR}/daemon/DAMX-Daemon
-
-  # Create systemd service file with improved configuration
-  cat > ${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME} << EOL
+  # The daemon removes stale sockets itself and sets the socket to
+  # root:damx 0660, so no ExecStartPre is needed.
+  if ! cat > "${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME}" << EOL
 [Unit]
 Description=DAMX Daemon for Acer laptops
-After=network.target
+After=systemd-modules-load.service
 
 [Service]
 Type=simple
@@ -699,20 +852,27 @@ ExecStart=${INSTALL_DIR}/daemon/DAMX-Daemon
 Restart=on-failure
 RestartSec=5
 User=root
+RuntimeDirectory=damx
+RuntimeDirectoryMode=0700
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOL
+  then
+    echo -e "${RED}Error: failed to write ${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME}.${NC}"
+    return 1
+  fi
 
-  # Enable and start the service
   systemctl daemon-reload
-  systemctl enable ${DAEMON_SERVICE_NAME}
-  systemctl start ${DAEMON_SERVICE_NAME}
+  if ! systemctl enable "${DAEMON_SERVICE_NAME}"; then
+    echo -e "${RED}Error: failed to enable ${DAEMON_SERVICE_NAME}.${NC}"
+    return 1
+  fi
+  systemctl restart "${DAEMON_SERVICE_NAME}"
 
-  # Verify service is running
-  if systemctl is-active --quiet ${DAEMON_SERVICE_NAME}; then
+  if systemctl is-active --quiet "${DAEMON_SERVICE_NAME}"; then
     echo -e "${GREEN}DAMX-Daemon installed and service started successfully!${NC}"
     return 0
   else
@@ -726,26 +886,23 @@ install_gui() {
 
   if [ ! -d "DAMX-GUI" ]; then
     echo -e "${RED}Error: DAMX-GUI directory not found!${NC}"
-    echo "Please make sure the script is run from the same directory containing DAMX-GUI folder."
+    echo "Please make sure the installer is run from the directory containing the DAMX-GUI folder."
     pause
     return 1
   fi
 
-  # Create installation directory
-  mkdir -p ${INSTALL_DIR}/gui
+  if ! mkdir -p "${INSTALL_DIR}/gui" ||
+     ! cp -rf DAMX-GUI/. "${INSTALL_DIR}/gui/" ||
+     ! chmod +x "${INSTALL_DIR}/gui/DivAcerManagerMax"; then
+    echo -e "${RED}Error: failed to copy DAMX-GUI to ${INSTALL_DIR}/gui.${NC}"
+    return 1
+  fi
 
-  # Copy GUI files
-  cp -rf DAMX-GUI/* ${INSTALL_DIR}/gui/
-  chmod +x ${INSTALL_DIR}/gui/DivAcerManagerMax
+  mkdir -p "${ICON_DIR}"
+  cp -f DAMX-GUI/icon.png "${ICON_DIR}/damx.png" ||
+    echo -e "${YELLOW}Warning: could not install the DAMX icon.${NC}"
 
-  # Create icon directory if it doesn't exist
-  mkdir -p ${ICON_DIR}
-
-  # Copy icon
-  cp -f DAMX-GUI/icon.png ${ICON_DIR}/damx.png
-
-  # Create desktop entry
-  cat > ${DESKTOP_FILE_DIR}/damx.desktop << EOL
+  cat > "${DESKTOP_FILE_DIR}/damx.desktop" << EOL
 [Desktop Entry]
 Name=DAMX
 Comment=Div Acer Manager Max
@@ -757,18 +914,248 @@ Categories=Utility;System;
 Keywords=acer;laptop;system;
 EOL
 
-  # Create command shortcut
-  cat > ${BIN_DIR}/DAMX << EOL
+  cat > "${BIN_DIR}/DAMX" << EOL
 #!/bin/bash
 ${INSTALL_DIR}/gui/DivAcerManagerMax "\$@"
 EOL
-  chmod +x ${BIN_DIR}/DAMX
+  chmod +x "${BIN_DIR}/DAMX"
 
   echo -e "${GREEN}DAMX-GUI installed successfully!${NC}"
   return 0
 }
 
+# Function to check system compatibility
+check_system() {
+  echo -e "${BLUE}Checking system compatibility...${NC}"
+
+  if ! command -v systemctl &> /dev/null; then
+    echo -e "${RED}Error: systemd is required but not found on this system.${NC}"
+    return 1
+  fi
+
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    echo "Detected OS: ${PRETTY_NAME:-unknown}"
+  fi
+
+  echo -e "${GREEN}System compatibility check passed.${NC}"
+  return 0
+}
+
+main_menu() {
+  local choice
+  local rc
+
+  if ! check_system; then
+    echo -e "${RED}System compatibility check failed. Exiting.${NC}"
+    pause
+    exit 1
+  fi
+
+  while true; do
+    print_banner
+
+    echo -e "Please select an option:"
+    echo -e "  ${GREEN}1${NC}) Install DAMX Suite (complete)"
+    echo -e "  ${GREEN}2${NC}) Install DAMX Suite (without drivers)"
+    echo -e "  ${GREEN}3${NC}) Uninstall DAMX Suite"
+    echo -e "  ${GREEN}4${NC}) Reinstall/Update DAMX Suite (recommended for upgrades)"
+    echo -e "  ${GREEN}5${NC}) Check service status"
+    echo -e "  ${GREEN}q${NC}) Quit"
+    echo ""
+
+    read -r -p "Enter your choice [1-5 or q]: " choice
+
+    case $choice in
+      1)
+        print_banner
+        echo -e "${BLUE}Starting complete installation...${NC}"
+        perform_install false false
+        rc=$?
+        [ "$rc" -eq 0 ] || exit "$rc"
+        ;;
+      2)
+        print_banner
+        echo -e "${BLUE}Starting installation without drivers...${NC}"
+        perform_install true false
+        rc=$?
+        [ "$rc" -eq 0 ] || exit "$rc"
+        ;;
+      3)
+        print_banner
+        echo -e "${BLUE}Starting uninstallation...${NC}"
+        uninstall
+        ;;
+      4)
+        print_banner
+        echo -e "${BLUE}Starting reinstallation/update...${NC}"
+        echo -e "${YELLOW}The new driver is built first; the existing installation is only replaced if the build succeeds.${NC}"
+        perform_install false true
+        rc=$?
+        [ "$rc" -eq 0 ] || exit "$rc"
+        ;;
+      5)
+        print_banner
+        echo -e "${BLUE}Checking DAMX service status...${NC}"
+        echo ""
+        if systemctl list-unit-files | grep -q "${DAEMON_SERVICE_NAME}"; then
+          systemctl status "${DAEMON_SERVICE_NAME}" --no-pager -l
+        else
+          echo -e "${YELLOW}DAMX service not found. The suite may not be installed.${NC}"
+        fi
+        echo ""
+        pause
+        ;;
+      q|Q)
+        echo -e "${BLUE}Exiting installer. Goodbye!${NC}"
+        exit 0
+        ;;
+      *)
+        echo -e "${RED}Invalid option. Please try again.${NC}"
+        sleep 2
+        ;;
+    esac
+  done
+}
+
+cleanup_workdir() {
+  if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then
+    rm -rf "$WORKDIR"
+  fi
+}
+
+make_workdir() {
+  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/damx-install.XXXXXX") || {
+    echo -e "${RED}Error: could not create a temporary working directory.${NC}"
+    exit 1
+  }
+  trap cleanup_workdir EXIT
+  trap 'exit 130' INT TERM
+}
+
+# Choose the Linuwu-Sense source tree. Sets DRIVER_SOURCE_DIR.
+# Order: $DAMX_DRIVER_DIR, ./Linuwu-Sense if it is the Div fork (defines
+# DRIVER_VERSION), ../Div-Linuwu-Sense (also ../../ for a git checkout where
+# this script lives in scripts/). A stale upstream clone is never used.
+select_driver_source() {
+  local candidate
+
+  DRIVER_SOURCE_DIR=""
+
+  if [ -n "${DAMX_DRIVER_DIR:-}" ]; then
+    if [ ! -f "${DAMX_DRIVER_DIR}/src/linuwu_sense.c" ]; then
+      echo -e "${RED}Error: DAMX_DRIVER_DIR=${DAMX_DRIVER_DIR} does not contain src/linuwu_sense.c.${NC}" >&2
+      return 1
+    fi
+    DRIVER_SOURCE_DIR=$(readlink -f "$DAMX_DRIVER_DIR")
+  elif has_driver_version_define "./Linuwu-Sense"; then
+    DRIVER_SOURCE_DIR=$(readlink -f "./Linuwu-Sense")
+  else
+    if [ -f "./Linuwu-Sense/src/linuwu_sense.c" ]; then
+      echo -e "${YELLOW}Ignoring ./Linuwu-Sense: it is not Div-Linuwu-Sense (no DRIVER_VERSION define), probably a stale upstream clone.${NC}" >&2
+    fi
+    for candidate in "../Div-Linuwu-Sense" "../../Div-Linuwu-Sense"; do
+      if [ -f "${candidate}/src/linuwu_sense.c" ]; then
+        DRIVER_SOURCE_DIR=$(readlink -f "$candidate")
+        break
+      fi
+    done
+  fi
+
+  if [ -z "$DRIVER_SOURCE_DIR" ]; then
+    echo -e "${RED}Error: no suitable Linuwu-Sense driver source found.${NC}" >&2
+    echo "Looked for (in order): \$DAMX_DRIVER_DIR, ./Linuwu-Sense (Div-Linuwu-Sense with DRIVER_VERSION)," >&2
+    echo "../Div-Linuwu-Sense and ../../Div-Linuwu-Sense, relative to $(pwd)." >&2
+    echo "Clone https://github.com/PXDiv/Div-Linuwu-Sense next to this repository or set DAMX_DRIVER_DIR." >&2
+    return 1
+  fi
+
+  echo -e "${BLUE}Using driver source: ${DRIVER_SOURCE_DIR} (DRIVER_VERSION $(get_driver_version "$DRIVER_SOURCE_DIR"))${NC}"
+  return 0
+}
+
+# Function to clean up nitro key detection service
+cleanup_nitro_service() {
+  echo -e "${YELLOW}Cleaning up Nitro Key Detection Service...${NC}"
+
+  local nitro_service_name="nitro-key-detection.service"
+
+  if systemctl is-active --quiet "${nitro_service_name}" 2>/dev/null; then
+    echo "Stopping ${nitro_service_name}..."
+    systemctl stop "${nitro_service_name}"
+  fi
+
+  if systemctl is-enabled --quiet "${nitro_service_name}" 2>/dev/null; then
+    echo "Disabling ${nitro_service_name}..."
+    systemctl disable "${nitro_service_name}"
+  fi
+
+  if [ -f "${SYSTEMD_DIR}/${nitro_service_name}" ]; then
+    echo "Removing ${nitro_service_name} file..."
+    rm -f "${SYSTEMD_DIR}/${nitro_service_name}"
+  fi
+
+  if [ -f "/usr/local/bin/nitro-key-detection.sh" ]; then
+    echo "Removing nitro-key-detection.sh script..."
+    rm -f "/usr/local/bin/nitro-key-detection.sh"
+  fi
+
+  if [ -f "/etc/damx/nitro_key.conf" ]; then
+    echo "Removing nitro_key.conf configuration..."
+    rm -f "/etc/damx/nitro_key.conf"
+  fi
+
+  echo -e "${GREEN}Nitro Key Detection Service cleanup completed.${NC}"
+}
+
+# comprehensive_cleanup <driver source dir or ""> <skip_drivers>
+comprehensive_cleanup() {
+  local driver_dir=${1:-}
+  local skip_drivers=${2:-false}
+
+  echo -e "${YELLOW}Performing comprehensive cleanup...${NC}"
+
+  if systemctl is-active --quiet "${DAEMON_SERVICE_NAME}" 2>/dev/null; then
+    echo "Stopping current DAMX-Daemon service..."
+    systemctl stop "${DAEMON_SERVICE_NAME}"
+  fi
+
+  if systemctl is-enabled --quiet "${DAEMON_SERVICE_NAME}" 2>/dev/null; then
+    echo "Disabling current DAMX-Daemon service..."
+    systemctl disable "${DAEMON_SERVICE_NAME}"
+  fi
+
+  if [ -f "${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME}" ]; then
+    echo "Removing current service file..."
+    rm -f "${SYSTEMD_DIR}/${DAEMON_SERVICE_NAME}"
+  fi
+
+  cleanup_nitro_service
+  cleanup_legacy_installation
+
+  echo "Removing current installation files..."
+  rm -rf "${INSTALL_DIR}"
+  rm -f "${BIN_DIR}/DAMX"
+  rm -f "${DESKTOP_FILE_DIR}/damx.desktop"
+  rm -f "${ICON_DIR}/damx.png"
+
+  if [ "$skip_drivers" != true ]; then
+    uninstall_drivers "$driver_dir"
+    rm -f "$DKMS_SIGNING_CONF"
+  fi
+
+  rm -rf /etc/damx
+
+  systemctl daemon-reload
+
+  echo -e "${GREEN}Comprehensive cleanup completed.${NC}"
+  return 0
+}
+
 configure_nitro_button() {
+  local response=""
+
   echo -e "${YELLOW}Configuring Nitro/PredatorSense Button Hardware Code...${NC}"
 
   # Ask user if they want to setup the key with 10 second timeout.
@@ -776,15 +1163,11 @@ configure_nitro_button() {
   # Predator machines have the same dedicated button (the PredatorSense key) —
   # it even sends the same code as the Nitro key on the models tested so far.
   echo -e "${YELLOW}Do you want to setup your Nitro/PredatorSense Key? (y/N) - Waiting 10 seconds...${NC}"
-  read -t 10 -n 1 -r response
-  
-  # Default to No if timeout or empty response
-  if [[ $? -ne 0 ]] || [[ -z "$response" ]]; then
+  if ! read -t 10 -n 1 -r response || [[ -z "$response" ]]; then
     echo -e "\n${BLUE}No response detected. Skipping Nitro button setup.${NC}"
     response="N"
   fi
 
-  # Check if user wants to skip
   if [[ ! "$response" =~ ^[Yy]$ ]]; then
     echo -e "${BLUE}Skipping button configuration. You can run setup again later to enable it.${NC}"
     return 0
@@ -805,7 +1188,7 @@ configure_nitro_button() {
   fi
 
   DEVICE=$(grep -A 5 -B 5 "AT Translated Set 2 keyboard" /proc/bus/input/devices | grep -m 1 "event" | sed 's/.*event\([0-9]\+\).*/\/dev\/input\/event\1/')
-  
+
   mkdir -p /etc/damx
 
   if [ -z "$DEVICE" ]; then
@@ -833,14 +1216,13 @@ configure_nitro_button() {
     echo -e "${YELLOW}remapper's own config instead.${NC}"
     echo "NITRO_KEY=425" > /etc/damx/nitro_key.conf
   fi
-  
-  # Install NitroKeyDetection.sh as a service
+
   install_nitro_service
 }
 
 detect_desktop_user() {
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id -u "$SUDO_USER" >/dev/null 2>&1; then
-    echo "$SUDO_USER"
+  if [ -n "$REAL_USER" ]; then
+    echo "$REAL_USER"
     return 0
   fi
 
@@ -857,42 +1239,40 @@ detect_desktop_user() {
 }
 
 install_nitro_service() {
-  echo -e "${YELLOW}Installing Nitro Key Detection Service...${NC}"
-  
-    # First, remove any existing installation
-  # cleanup_nitro_service
-  
-  # Get the directory where the main script is located
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  NITRO_SCRIPT="$SCRIPT_DIR/nitro-key-detection.sh"
-  TARGET_USER=$(detect_desktop_user)
+  local nitro_script
+  local target_user
 
-  if [ -z "$TARGET_USER" ] || ! id -u "$TARGET_USER" >/dev/null 2>&1; then
+  echo -e "${YELLOW}Installing Nitro Key Detection Service...${NC}"
+
+  # The installer already cd'ed into its own directory.
+  nitro_script="$(pwd)/nitro-key-detection.sh"
+  target_user=$(detect_desktop_user)
+
+  if [ -z "$target_user" ] || ! id -u "$target_user" >/dev/null 2>&1; then
     echo -e "${RED}Error: Could not determine desktop user for Nitro key launcher.${NC}"
     return 1
   fi
 
-  echo -e "${BLUE}The button will launch DAMX for user: ${TARGET_USER}${NC}"
-  
-  # Check if NitroKeyDetection.sh exists
-  if [ ! -f "$NITRO_SCRIPT" ]; then
-    echo -e "${RED}Error: NitroKeyDetection.sh not found in $SCRIPT_DIR${NC}"
+  echo -e "${BLUE}The button will launch DAMX for user: ${target_user}${NC}"
+
+  if [ ! -f "$nitro_script" ]; then
+    echo -e "${RED}Error: nitro-key-detection.sh not found in $(pwd)${NC}"
     return 1
   fi
-  
-  # Make the script executable
-  chmod +x "$NITRO_SCRIPT"
-  
-  # Copy script to /usr/local/bin
-  cp "$NITRO_SCRIPT" /usr/local/bin/
-  chmod +x "/usr/local/bin/nitro-key-detection.sh"
-  
-  # Create systemd service file
-  cat > /etc/systemd/system/nitro-key-detection.service << EOF
+
+  if ! install -m 755 "$nitro_script" /usr/local/bin/nitro-key-detection.sh; then
+    echo -e "${RED}Error: could not install nitro-key-detection.sh${NC}"
+    return 1
+  fi
+
+  # System service (it reads /dev/input as root and launches the GUI in the
+  # user's session), so graphical-session.target is not available here.
+  # No After=multi-user.target: with WantedBy=multi-user.target that is an
+  # ordering cycle. The script itself waits for the user's session.
+  cat > "${SYSTEMD_DIR}/nitro-key-detection.service" << EOF
 [Unit]
 Description=Nitro/PredatorSense Key Detection Service
-After=multi-user.target
-After=network.target
+After=systemd-user-sessions.service systemd-udevd.service
 
 [Service]
 Type=simple
@@ -902,18 +1282,16 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 User=root
-Environment=DAMX_TARGET_USER=${TARGET_USER}
+Environment=DAMX_TARGET_USER=${target_user}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  # Reload systemd, enable and start the service
   systemctl daemon-reload
   systemctl enable nitro-key-detection.service
-  systemctl start nitro-key-detection.service
-  
-  # Check if service is running
+  systemctl restart nitro-key-detection.service
+
   if systemctl is-active --quiet nitro-key-detection.service; then
     echo -e "${GREEN}✓ Nitro Key Detection Service installed and running successfully!${NC}"
     echo -e "${GREEN}Service status: $(systemctl status nitro-key-detection.service --no-pager | grep Active)${NC}"
@@ -922,7 +1300,7 @@ EOF
     journalctl -u nitro-key-detection.service -n 10 --no-pager
     return 1
   fi
-  
+
   echo -e "${BLUE}Service commands:${NC}"
   echo -e "  Start: systemctl start nitro-key-detection.service"
   echo -e "  Stop:  systemctl stop nitro-key-detection.service"
@@ -930,13 +1308,14 @@ EOF
   echo -e "  Logs:  journalctl -u nitro-key-detection.service -f"
 }
 
-# Example of how to call it from your main script
-# configure_nitro_button
-
 perform_install() {
   local skip_drivers=$1
   local is_update=$2
   local signing_status
+  local build_dir=""
+  local driver_result=0
+  local daemon_result
+  local gui_result
 
   # Do this before cleanup so a pending MOK enrollment never removes an
   # otherwise working installation.
@@ -949,57 +1328,73 @@ perform_install() {
       fi
       return $signing_status
     fi
+
+    # Build first, in a private copy of the source, so a failed build leaves
+    # the existing installation untouched.
+    if ! select_driver_source; then
+      pause
+      return 1
+    fi
+    build_dir="${WORKDIR}/Linuwu-Sense"
+    rm -rf "$build_dir"
+    if ! mkdir -p "$build_dir" || ! cp -a "${DRIVER_SOURCE_DIR}/." "$build_dir/"; then
+      echo -e "${RED}Error: could not copy the driver source to ${build_dir}.${NC}"
+      return 1
+    fi
+    if ! build_driver "$build_dir"; then
+      echo -e "${RED}Driver build failed; the existing installation was left untouched.${NC}"
+      pause
+      return 1
+    fi
   fi
 
-  # If this is an update/reinstall, perform cleanup first
   if [ "$is_update" = true ]; then
-    echo -e "${BLUE}Performing cleanup before installation...${NC}"
-    comprehensive_cleanup
+    echo -e "${BLUE}Removing the previous installation...${NC}"
+    comprehensive_cleanup "$build_dir" "$skip_drivers"
     echo ""
   else
-    # For fresh installs, still check for legacy installations
     cleanup_legacy_installation
     echo ""
   fi
 
-  # Create main installation directory
-  mkdir -p ${INSTALL_DIR}
+  mkdir -p "${INSTALL_DIR}"
 
-  # Install components
   if [ "$skip_drivers" = false ]; then
-    install_drivers
-    DRIVER_RESULT=$?
-    if [ $DRIVER_RESULT -ne 0 ]; then
+    install_built_driver "$build_dir"
+    driver_result=$?
+    if [ $driver_result -ne 0 ]; then
       echo -e "${RED}Driver installation failed; daemon and GUI installation were not attempted.${NC}"
-      return $DRIVER_RESULT
+      pause
+      return $driver_result
     fi
   else
     echo -e "${YELLOW}Skipping driver installation as requested.${NC}"
-    DRIVER_RESULT=0
   fi
 
+  # Must exist before the daemon starts so it can hand the socket to the group.
+  setup_damx_group
+
   install_daemon
-  DAEMON_RESULT=$?
+  daemon_result=$?
 
   install_gui
-  GUI_RESULT=$?
+  gui_result=$?
 
-  #Setup NitroButton shortcut
   configure_nitro_button
 
-  # Check if all installations were successful
-  if [ $DRIVER_RESULT -eq 0 ] && [ $DAEMON_RESULT -eq 0 ] && [ $GUI_RESULT -eq 0 ]; then
+  if [ $driver_result -eq 0 ] && [ $daemon_result -eq 0 ] && [ $gui_result -eq 0 ]; then
     echo -e "${GREEN}DAMX Suite installation completed successfully!${NC}"
     echo -e "You can now run the GUI using the ${BLUE}DAMX${NC} command or from your application launcher."
+    print_group_note
 
-    # Show service status
     echo ""
     echo -e "${BLUE}Service Status:${NC}"
-    systemctl status ${DAEMON_SERVICE_NAME} --no-pager -l
+    systemctl status "${DAEMON_SERVICE_NAME}" --no-pager -l
     pause
     return 0
   else
     echo -e "${RED}Some components failed to install. Please check the errors above.${NC}"
+    print_group_note
     pause
     return 1
   fi
@@ -1007,109 +1402,43 @@ perform_install() {
 
 uninstall() {
   echo -e "${YELLOW}Uninstalling DAMX Suite...${NC}"
-  comprehensive_cleanup
+  DRIVER_SOURCE_DIR=""
+  select_driver_source 2> /dev/null || true
+  comprehensive_cleanup "$DRIVER_SOURCE_DIR" false
   echo -e "${GREEN}DAMX Suite uninstalled successfully!${NC}"
+  print_group_removal_note
   pause
   return 0
 }
 
-# Function to check system compatibility
-check_system() {
-  echo -e "${BLUE}Checking system compatibility...${NC}"
+main() {
+  local script_path
 
-  # Check if systemd is available
-  if ! command -v systemctl &> /dev/null; then
-    echo -e "${RED}Error: systemd is required but not found on this system.${NC}"
-    return 1
-  fi
+  # Work from the installer's own directory regardless of the caller's CWD.
+  script_path=$(readlink -f "$0")
+  cd "$(dirname "$script_path")" || {
+    echo "Error: cannot change to the installer directory." >&2
+    exit 1
+  }
 
-  # Check if we're on a supported distribution
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    echo "Detected OS: $PRETTY_NAME"
-  fi
-
-  echo -e "${GREEN}System compatibility check passed.${NC}"
-  return 0
-}
-
-main_menu() {
-  # Perform initial system check
-  if ! check_system; then
-    echo -e "${RED}System compatibility check failed. Exiting.${NC}"
-    pause
+  if [ "$EUID" -ne 0 ]; then
+    echo -e "${YELLOW}This script requires root privileges.${NC}"
+    if command -v sudo &> /dev/null; then
+      echo -e "${BLUE}Attempting to run with sudo...${NC}"
+      # `bash` explicitly, so it works without the exec bit.
+      exec sudo bash "$script_path" "$@"
+    fi
+    echo -e "${RED}Error: sudo not found. Please run this script as root.${NC}"
     exit 1
   fi
 
-  while true; do
-    print_banner
-
-    echo -e "Please select an option:"
-    echo -e "  ${GREEN}1${NC}) Install DAMX Suite (complete)"
-    echo -e "  ${GREEN}2${NC}) Install DAMX Suite (without drivers)"
-    echo -e "  ${GREEN}3${NC}) Uninstall DAMX Suite"
-    echo -e "  ${GREEN}4${NC}) Reinstall/Update DAMX Suite (recommended for upgrades)"
-    echo -e "  ${GREEN}5${NC}) Check service status"
-    echo -e "  ${GREEN}q${NC}) Quit"
-    echo ""
-
-    read -p "Enter your choice [1-5 or q]: " choice
-
-    case $choice in
-      1)
-        print_banner
-        echo -e "${BLUE}Starting complete installation...${NC}"
-        perform_install false false
-        if [ $? -eq 2 ]; then
-          exit 2
-        fi
-        ;;
-      2)
-        print_banner
-        echo -e "${BLUE}Starting installation without drivers...${NC}"
-        perform_install true false
-        ;;
-      3)
-        print_banner
-        echo -e "${BLUE}Starting uninstallation...${NC}"
-        uninstall
-        ;;
-      4)
-        print_banner
-        echo -e "${BLUE}Starting reinstallation/update...${NC}"
-        echo -e "${YELLOW}This will completely remove the existing installation before installing the new version.${NC}"
-        perform_install false true
-        if [ $? -eq 2 ]; then
-          exit 2
-        fi
-        ;;
-      5)
-        print_banner
-        echo -e "${BLUE}Checking DAMX service status...${NC}"
-        echo ""
-        if systemctl list-unit-files | grep -q ${DAEMON_SERVICE_NAME}; then
-          systemctl status ${DAEMON_SERVICE_NAME} --no-pager -l
-        else
-          echo -e "${YELLOW}DAMX service not found. The suite may not be installed.${NC}"
-        fi
-        echo ""
-        pause
-        ;;
-      q|Q)
-        echo -e "${BLUE}Exiting installer. Goodbye!${NC}"
-        exit 0
-        ;;
-      *)
-        echo -e "${RED}Invalid option. Please try again.${NC}"
-        sleep 2
-        ;;
-    esac
-  done
+  REAL_USER=$(resolve_real_user)
+  make_workdir
+  main_menu
 }
 
-# Check and elevate privileges if needed
-check_root "$@"
-
-# Start the installer
-main_menu
-exit 0
+# Run only when executed, not when sourced (e.g. by a test harness).
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+  main "$@"
+  exit 0
+fi

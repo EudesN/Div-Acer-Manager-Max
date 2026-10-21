@@ -8,6 +8,12 @@ else
     NITRO_KEY=425
 fi
 
+# The key code is interpolated into a regex below; only accept a number.
+if ! [[ "${NITRO_KEY:-}" =~ ^[0-9]+$ ]]; then
+    echo "Warning: invalid NITRO_KEY '${NITRO_KEY:-}', using default 425."
+    NITRO_KEY=425
+fi
+
 find_target_user() {
     if [ -n "${DAMX_TARGET_USER:-}" ] && id -u "$DAMX_TARGET_USER" >/dev/null 2>&1; then
         echo "$DAMX_TARGET_USER"
@@ -103,7 +109,9 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus"
 echo "Monitoring Nitro/PredatorSense button (code $NITRO_KEY) on $DEVICE for user $TARGET_USER..."
 echo "Using DISPLAY=$DISPLAY WAYLAND_DISPLAY=$WAYLAND_DISPLAY XAUTHORITY=$XAUTHORITY"
 
-evtest "$DEVICE" | grep --line-buffered "code $NITRO_KEY.*value 1" | while read -r _line; do
+# evtest prints e.g. "Event: time ..., type 1 (EV_KEY), code 425 (KEY_PRESENTATION), value 1".
+# Match the exact code (425 must not match 4250) and key presses only.
+evtest "$DEVICE" | grep --line-buffered -E "type 1 \(EV_KEY\), code ${NITRO_KEY} \(.*\), value 1$" | while read -r _line; do
     if ! pgrep -f "/opt/damx/gui/DivAcerManagerMax" > /dev/null; then
         sudo -u "$TARGET_USER" \
             DISPLAY="$DISPLAY" \

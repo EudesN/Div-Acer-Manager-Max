@@ -57,8 +57,8 @@
         <Style Selector="StackPanel.Brand > TextBlock">
             <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
             <Setter Property="FontWeight" Value="Bold" />
-            <Setter Property="FontSize" Value="15" />
-            <Setter Property="LetterSpacing" Value="2" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="LetterSpacing" Value="1.5" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
@@ -77,31 +77,32 @@
 
     </Window.Styles>
 
-    <Grid RowDefinitions="56,*">
+    <Grid RowDefinitions="40,*">
 
         <!-- ============================================================ Header bar -->
-        <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
+        <!-- Minimal: wordmark, muted model, status dot + text; one hairline at the bottom -->
+        <Border Grid.Row="0" Background="{StaticResource BgBrush}"
                 BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 0 1">
             <Panel>
-                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="20 0">
-                    <Image Source="iconTransparent.png" Width="22" Height="22" VerticalAlignment="Center"
-                           Margin="0 0 12 0" />
+                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="16 0">
+                    <Image Source="iconTransparent.png" Width="16" Height="16" VerticalAlignment="Center"
+                           Margin="0 0 10 0" />
                     <StackPanel Grid.Column="1" Classes="Brand" Orientation="Horizontal" Spacing="6">
                         <TextBlock Text="DAMX" Foreground="{StaticResource InkBrush}" />
-                        <TextBlock Text="//" Foreground="{StaticResource InkMutedBrush}" />
-                        <TextBlock Text="ACER CONTROL" Foreground="{StaticResource InkSecondaryBrush}" />
+                        <TextBlock Text="// ACER CONTROL" Foreground="{StaticResource InkMutedBrush}" />
                     </StackPanel>
 
                     <TextBlock x:Name="HeaderModelText" Grid.Column="3" Text="—" Classes="Mono"
-                               FontSize="12" LetterSpacing="1" Foreground="{StaticResource InkSecondaryBrush}"
-                               VerticalAlignment="Center" Margin="0 0 16 0" MaxWidth="360"
+                               FontSize="11" Foreground="{StaticResource InkMutedBrush}"
+                               VerticalAlignment="Center" Margin="0 0 20 0" MaxWidth="320"
                                TextTrimming="CharacterEllipsis" />
 
                     <Border x:Name="DaemonStatusChip" Grid.Column="4" Classes="Chip"
+                            BorderThickness="0" Padding="0"
                             Background="Transparent" Cursor="Hand"
                             Tapped="DaemonStatusChip_OnTapped"
                             ToolTip.Tip="Daemon connection (/var/run/DAMX.sock). Click to reconnect.">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
                             <Ellipse x:Name="DaemonStatusDot" Classes="StatusDot" />
                             <TextBlock x:Name="DaemonStatusText" Text="CONNECTING" />
                         </StackPanel>

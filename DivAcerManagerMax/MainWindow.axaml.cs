@@ -58,19 +58,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private static readonly Dictionary<string, ProfileInfo> KnownProfiles = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["low-power"] = new ProfileInfo("ECO", MaterialIconKind.Leaf,
+        ["low-power"] = new ProfileInfo("Low Power", MaterialIconKind.Leaf,
             "Prioritizes energy efficiency, reduces performance to extend battery life.", true, false),
-        ["cool"] = new ProfileInfo("COOL", MaterialIconKind.Fan,
+        ["cool"] = new ProfileInfo("Cool", MaterialIconKind.Fan,
             "Keeps the chassis cool by limiting power.", true, true),
-        ["quiet"] = new ProfileInfo("QUIET", MaterialIconKind.FanMinus,
+        ["quiet"] = new ProfileInfo("Quiet", MaterialIconKind.FanMinus,
             "Minimizes noise, prioritizes low power and cooling.", false, true),
-        ["balanced"] = new ProfileInfo("BALANCED", MaterialIconKind.ScaleBalance,
+        ["balanced"] = new ProfileInfo("Balanced", MaterialIconKind.ScaleBalance,
             "Optimal mix of performance and noise for everyday tasks.", true, true),
-        ["balanced-performance"] = new ProfileInfo("PERFORMANCE", MaterialIconKind.SpeedometerMedium,
+        ["balanced-performance"] = new ProfileInfo("Performance", MaterialIconKind.SpeedometerMedium,
             "Maximizes speed for demanding workloads, higher fan noise.", false, true),
-        ["performance"] = new ProfileInfo("TURBO", MaterialIconKind.RocketLaunch,
+        ["performance"] = new ProfileInfo("Turbo", MaterialIconKind.RocketLaunch,
             "Unleashes peak power for extreme tasks, loudest fans.", false, true),
-        ["custom"] = new ProfileInfo("CUSTOM", MaterialIconKind.TuneVariant,
+        ["custom"] = new ProfileInfo("Custom", MaterialIconKind.TuneVariant,
             "Firmware custom profile.", true, true)
     };
 
@@ -537,8 +537,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         return KnownProfiles.TryGetValue(profile, out var info)
             ? info
-            : new ProfileInfo(profile.ToUpperInvariant(), MaterialIconKind.Speedometer,
+            : new ProfileInfo(TitleCase(profile), MaterialIconKind.Speedometer,
                 $"Firmware profile '{profile}'.", true, true);
+    }
+
+    /// <summary>"balanced-performance" -> "Balanced Performance" for names the GUI does not know.</summary>
+    private static string TitleCase(string name)
+    {
+        var words = name.Split(new[] { '-', '_', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(w => char.ToUpperInvariant(w[0]) + w.Substring(1).ToLowerInvariant());
+        var result = string.Join(" ", words);
+        return result.Length > 0 ? result : name;
     }
 
     /// <summary>Builds the segmented control from the profiles the daemon reported (never assumes any exist).</summary>
@@ -562,9 +571,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             })
             .ToList();
 
-        _profileButtonsPanel.Children.Clear();
-        for (var i = 0; i < toShow.Count; i++)
-            _profileButtonsPanel.Children.Add(CreateProfileButton(toShow[i], i == toShow.Count - 1));
+        LayoutProfileButtons(toShow);
 
         _currentProfile = current;
         SelectProfileButton(current);
@@ -579,14 +586,49 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         UpdateFanModeAvailability();
     }
 
-    private RadioButton CreateProfileButton(string profile, bool isLast)
+    /// <summary>
+    ///     Places the segments in the ProfileButtonsPanel grid: one row for up to 3 profiles,
+    ///     otherwise 2 rows (4 -> 2x2, 5+ -> 3 columns), so full names fit in the 420 px card.
+    /// </summary>
+    private void LayoutProfileButtons(List<string> profiles)
+    {
+        if (_profileButtonsPanel == null) return;
+        _profileButtonsPanel.Children.Clear();
+
+        var count = profiles.Count;
+        var columns = count <= 3 ? Math.Max(count, 1) : count == 4 ? 2 : 3;
+        var rows = (count + columns - 1) / columns;
+
+        if (_profileButtonsPanel is Grid grid)
+        {
+            grid.ColumnDefinitions.Clear();
+            grid.RowDefinitions.Clear();
+            for (var c = 0; c < columns; c++) grid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
+            for (var r = 0; r < rows; r++) grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+        }
+
+        for (var i = 0; i < count; i++)
+        {
+            var row = i / columns;
+            var column = i % columns;
+            var button = CreateProfileButton(profiles[i]);
+            button.Margin = new Thickness(0, 0, column == columns - 1 ? 0 : 6, row == rows - 1 ? 0 : 6);
+            Grid.SetRow(button, row);
+            Grid.SetColumn(button, column);
+            _profileButtonsPanel.Children.Add(button);
+        }
+    }
+
+    private RadioButton CreateProfileButton(string profile)
     {
         var info = GetProfileInfo(profile);
 
+        // Icon left of the text; both inherit the segment's Foreground
+        // (off-white, near-black on the checked accent fill).
         var content = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 8,
+            Spacing = 6,
             HorizontalAlignment = HorizontalAlignment.Center
         };
         content.Children.Add(new MaterialIcon
@@ -608,7 +650,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             GroupName = "ProfileGroup",
             Tag = profile,
             Content = content,
-            Margin = isLast ? new Thickness(0) : new Thickness(0, 0, 6, 0)
+            Padding = new Thickness(8, 6),
+            HorizontalAlignment = HorizontalAlignment.Stretch
         };
 
         if (this.TryFindResource("SegmentRadio", out var theme) && theme is ControlTheme controlTheme)

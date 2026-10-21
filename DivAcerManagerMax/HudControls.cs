@@ -516,6 +516,14 @@ public class SegmentBar : Control
         var fraction = max > 0 && !double.IsNaN(value) && !double.IsNaN(max) ? Math.Clamp(value / max, 0, 1) : 0;
         var filledWidth = fraction * width;
 
+        // Gap == 0: plain continuous bar (track + filled part).
+        if (gap == 0)
+        {
+            if (TrackBrush != null) context.FillRectangle(TrackBrush, new Rect(0, 0, width, height));
+            if (Fill != null && filledWidth > 0) context.FillRectangle(Fill, new Rect(0, 0, filledWidth, height));
+            return;
+        }
+
         for (var x = 0.0; x < width; x += step)
         {
             var w = Math.Min(segment, width - x);

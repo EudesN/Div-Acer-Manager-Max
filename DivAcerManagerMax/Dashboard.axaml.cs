@@ -51,7 +51,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     private double _batteryLevel;
     private string _batteryLimiterText = Dash;
     private string _batteryPercentText = Dash;
-    private string _batteryStatus = "UNKNOWN";
+    private string _batteryStatus = "Unknown";
     private string _batteryTimeRemainingString = Dash;
     private double _cpuFanAngle;
     private double _cpuFanLevel;
@@ -71,7 +71,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     private string _gpuFanText = Dash;
     private string _gpuDriverText = Dash;
     private string _gpuName = "Detecting…";
-    private string _gpuStateText = "CORE TEMP";
+    private string _gpuStateText = "Core temperature";
     private double _gpuTemp;
     private ObservableCollection<double> _gpuTempHistory = new();
     private string _gpuTempText = Dash;
@@ -178,8 +178,8 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     {
         BatteryLimiterText = enabled switch
         {
-            true => "ON · 80%",
-            false => "OFF",
+            true => "On · 80%",
+            false => "Off",
             null => Dash
         };
     }
@@ -349,7 +349,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 GpuUsageText = Dash;
                 GpuUsage = 0;
                 IsGpuHot = false;
-                GpuStateText = "dGPU ASLEEP · NOT POLLED";
+                GpuStateText = "dGPU asleep — not polled to save power";
             }
             else
             {
@@ -359,7 +359,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 IsGpuHot = validTemp && m.GpuTemp >= HotTemperatureC;
                 GpuUsage = double.IsNaN(m.GpuUsage) ? 0 : m.GpuUsage;
                 GpuUsageText = double.IsNaN(m.GpuUsage) ? Dash : FormatNumber(m.GpuUsage);
-                GpuStateText = "CORE TEMP";
+                GpuStateText = "Core temperature";
                 if (validTemp) _lastGpuTemp = m.GpuTemp;
             }
 
@@ -368,9 +368,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 BatteryPercentageInt = m.BatteryPercentage;
                 BatteryPercentText = m.BatteryPercentage.ToString(Inv);
                 BatteryLevel = m.BatteryPercentage;
-                BatteryStatus = string.IsNullOrWhiteSpace(m.BatteryStatus)
-                    ? "UNKNOWN"
-                    : m.BatteryStatus.ToUpperInvariant();
+                BatteryStatus = string.IsNullOrWhiteSpace(m.BatteryStatus) ? "Unknown" : m.BatteryStatus;
                 BatteryTimeRemainingString = FormatHoursMinutes(m.BatteryTimeRemainingHours);
             }
 
@@ -785,7 +783,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 GeometryStroke = null,
                 GeometryFill = null,
                 GeometrySize = 0,
-                Fill = AreaFill(cpuColor)
+                Fill = null
             },
             new LineSeries<double>
             {
@@ -795,7 +793,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 GeometryStroke = null,
                 GeometryFill = null,
                 GeometrySize = 0,
-                Fill = AreaFill(gpuColor)
+                Fill = null
             }
         };
 
@@ -816,9 +814,9 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
             new()
             {
                 LabelsPaint = new SolidColorPaint(new SKColor(0x77, 0x73, 0x6C)),
-                TextSize = 11,
+                TextSize = 10,
                 Labeler = value => value.ToString("0", CultureInfo.InvariantCulture) + "°",
-                SeparatorsPaint = new SolidColorPaint(new SKColor(0x2A, 0x2E, 0x33)) { StrokeThickness = 1 }
+                SeparatorsPaint = new SolidColorPaint(new SKColor(0x1C, 0x1F, 0x23)) { StrokeThickness = 1 }
             }
         };
     }

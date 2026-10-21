@@ -45,9 +45,12 @@
         <SolidColorBrush x:Key="SurfaceBrush" Color="#121417" />
         <SolidColorBrush x:Key="SurfaceRaisedBrush" Color="#171A1E" />
         <SolidColorBrush x:Key="HairlineBrush" Color="#2A2E33" />
+        <!-- card edge: barely-there hairline -->
+        <SolidColorBrush x:Key="EdgeBrush" Color="#1C1F23" />
         <SolidColorBrush x:Key="LineStrongBrush" Color="#3A3F45" />
 
         <SolidColorBrush x:Key="InkBrush" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="InkHoverBrush" Color="#F7F4EE" />
         <SolidColorBrush x:Key="InkSecondaryBrush" Color="#B8B2A7" />
         <SolidColorBrush x:Key="InkMutedBrush" Color="#77736C" />
         <SolidColorBrush x:Key="InkDisabledBrush" Color="#4A4843" />
@@ -96,10 +99,10 @@
         <x:Double x:Key="TabItemHeaderFontSize">12</x:Double>
         <SolidColorBrush x:Key="TabItemHeaderBackgroundUnselected" Color="Transparent" />
         <SolidColorBrush x:Key="TabItemHeaderBackgroundUnselectedPointerOver" Color="#14ECE7DD" />
-        <SolidColorBrush x:Key="TabItemHeaderBackgroundUnselectedPressed" Color="#1FE8F23A" />
+        <SolidColorBrush x:Key="TabItemHeaderBackgroundUnselectedPressed" Color="#14ECE7DD" />
         <SolidColorBrush x:Key="TabItemHeaderBackgroundSelected" Color="#14ECE7DD" />
-        <SolidColorBrush x:Key="TabItemHeaderBackgroundSelectedPointerOver" Color="#1FE8F23A" />
-        <SolidColorBrush x:Key="TabItemHeaderBackgroundSelectedPressed" Color="#33E8F23A" />
+        <SolidColorBrush x:Key="TabItemHeaderBackgroundSelectedPointerOver" Color="#14ECE7DD" />
+        <SolidColorBrush x:Key="TabItemHeaderBackgroundSelectedPressed" Color="#24ECE7DD" />
         <SolidColorBrush x:Key="TabItemHeaderForegroundUnselected" Color="#77736C" />
         <SolidColorBrush x:Key="TabItemHeaderForegroundUnselectedPointerOver" Color="#ECE7DD" />
         <SolidColorBrush x:Key="TabItemHeaderForegroundUnselectedPressed" Color="#ECE7DD" />
@@ -118,13 +121,13 @@
         <SolidColorBrush x:Key="SliderTrackFillPointerOver" Color="#66ECE7DD" />
         <SolidColorBrush x:Key="SliderTrackFillPressed" Color="#66ECE7DD" />
         <SolidColorBrush x:Key="SliderTrackFillDisabled" Color="#2A2E33" />
-        <SolidColorBrush x:Key="SliderTrackValueFill" Color="#E8F23A" />
-        <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="#F0F66E" />
-        <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="#E8F23A" />
+        <SolidColorBrush x:Key="SliderTrackValueFill" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="#F7F4EE" />
+        <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="#ECE7DD" />
         <SolidColorBrush x:Key="SliderTrackValueFillDisabled" Color="#4A4843" />
         <SolidColorBrush x:Key="SliderThumbBackground" Color="#ECE7DD" />
-        <SolidColorBrush x:Key="SliderThumbBackgroundPointerOver" Color="#E8F23A" />
-        <SolidColorBrush x:Key="SliderThumbBackgroundPressed" Color="#E8F23A" />
+        <SolidColorBrush x:Key="SliderThumbBackgroundPointerOver" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="SliderThumbBackgroundPressed" Color="#ECE7DD" />
         <SolidColorBrush x:Key="SliderThumbBackgroundDisabled" Color="#4A4843" />
         <SolidColorBrush x:Key="SliderThumbBorderBrush" Color="Transparent" />
 
@@ -141,13 +144,13 @@
         <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPointerOver" Color="#ECE7DD" />
         <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPressed" Color="#ECE7DD" />
         <SolidColorBrush x:Key="ToggleSwitchKnobFillOffDisabled" Color="#4A4843" />
-        <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#E8F23A" />
-        <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#F0F66E" />
-        <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#C9D22F" />
+        <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#F7F4EE" />
+        <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#B8B2A7" />
         <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="#4A4843" />
-        <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="#E8F23A" />
-        <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="#F0F66E" />
-        <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="#C9D22F" />
+        <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="#F7F4EE" />
+        <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="#B8B2A7" />
         <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="#4A4843" />
         <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#0B0C0E" />
         <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#0B0C0E" />
@@ -166,19 +169,19 @@
         <SolidColorBrush x:Key="CheckBoxForegroundCheckedPressed" Color="#ECE7DD" />
         <SolidColorBrush x:Key="CheckBoxForegroundCheckedDisabled" Color="#4A4843" />
         <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUnchecked" Color="#66ECE7DD" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPointerOver" Color="#E8F23A" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPressed" Color="#E8F23A" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPointerOver" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedPressed" Color="#ECE7DD" />
         <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeUncheckedDisabled" Color="#2A2E33" />
         <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUnchecked" Color="Transparent" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPointerOver" Color="#1FE8F23A" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPressed" Color="#33E8F23A" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="#E8F23A" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="#F0F66E" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPressed" Color="#C9D22F" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPointerOver" Color="#14ECE7DD" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillUncheckedPressed" Color="#33ECE7DD" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="#F7F4EE" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPressed" Color="#B8B2A7" />
         <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedDisabled" Color="#4A4843" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="#E8F23A" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="#F0F66E" />
-        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPressed" Color="#C9D22F" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="#ECE7DD" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" Color="#F7F4EE" />
+        <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPressed" Color="#B8B2A7" />
         <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedDisabled" Color="#4A4843" />
         <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundChecked" Color="#0B0C0E" />
         <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundCheckedPointerOver" Color="#0B0C0E" />
@@ -191,8 +194,8 @@
         <SolidColorBrush x:Key="ComboBoxBackgroundPressed" Color="#171A1E" />
         <SolidColorBrush x:Key="ComboBoxBackgroundDisabled" Color="#121417" />
         <SolidColorBrush x:Key="ComboBoxBorderBrush" Color="#3A3F45" />
-        <SolidColorBrush x:Key="ComboBoxBorderBrushPointerOver" Color="#E8F23A" />
-        <SolidColorBrush x:Key="ComboBoxBorderBrushPressed" Color="#E8F23A" />
+        <SolidColorBrush x:Key="ComboBoxBorderBrushPointerOver" Color="#99ECE7DD" />
+        <SolidColorBrush x:Key="ComboBoxBorderBrushPressed" Color="#99ECE7DD" />
         <SolidColorBrush x:Key="ComboBoxBorderBrushDisabled" Color="#2A2E33" />
         <SolidColorBrush x:Key="ComboBoxForeground" Color="#ECE7DD" />
         <SolidColorBrush x:Key="ComboBoxForegroundDisabled" Color="#4A4843" />
@@ -204,15 +207,15 @@
         <SolidColorBrush x:Key="ComboBoxItemForegroundPointerOver" Color="#ECE7DD" />
         <SolidColorBrush x:Key="ComboBoxItemForegroundSelected" Color="#ECE7DD" />
         <SolidColorBrush x:Key="ComboBoxItemBackgroundPointerOver" Color="#14ECE7DD" />
-        <SolidColorBrush x:Key="ComboBoxItemBackgroundPressed" Color="#1FE8F23A" />
-        <SolidColorBrush x:Key="ComboBoxItemBackgroundSelected" Color="#1FE8F23A" />
-        <SolidColorBrush x:Key="ComboBoxItemBackgroundSelectedPointerOver" Color="#33E8F23A" />
-        <SolidColorBrush x:Key="ComboBoxItemPillFill" Color="#E8F23A" />
+        <SolidColorBrush x:Key="ComboBoxItemBackgroundPressed" Color="#14ECE7DD" />
+        <SolidColorBrush x:Key="ComboBoxItemBackgroundSelected" Color="#14ECE7DD" />
+        <SolidColorBrush x:Key="ComboBoxItemBackgroundSelectedPointerOver" Color="#33ECE7DD" />
+        <SolidColorBrush x:Key="ComboBoxItemPillFill" Color="#ECE7DD" />
 
         <!-- ScrollBar (thin) -->
         <SolidColorBrush x:Key="ScrollBarThumbFill" Color="#66ECE7DD" />
         <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="#99ECE7DD" />
-        <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#E8F23A" />
+        <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#ECE7DD" />
         <SolidColorBrush x:Key="ScrollBarPanningThumbBackground" Color="#66ECE7DD" />
         <SolidColorBrush x:Key="ScrollBarTrackFill" Color="Transparent" />
         <SolidColorBrush x:Key="ScrollBarTrackFillPointerOver" Color="#14ECE7DD" />
@@ -245,7 +248,7 @@
         <ControlTheme x:Key="{x:Type Button}" TargetType="Button">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{StaticResource InkBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource Ink40Brush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Ink25Brush}" />
             <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
             <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="FontSize" Value="12" />
@@ -274,12 +277,12 @@
             </Setter>
 
             <Style Selector="^:pointerover /template/ local|HudPanel#PART_Frame">
-                <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                <Setter Property="Background" Value="{StaticResource Ink08Brush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource Ink60Brush}" />
             </Style>
             <Style Selector="^:pressed /template/ local|HudPanel#PART_Frame">
-                <Setter Property="Background" Value="{StaticResource AccentPressedSoftBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                <Setter Property="Background" Value="{StaticResource Ink20Brush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource Ink60Brush}" />
             </Style>
             <Style Selector="^:focus-visible /template/ local|HudPanel#PART_Frame">
                 <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
@@ -294,20 +297,20 @@
 
             <!-- Primary: filled accent with near-black text (declared after the generic states) -->
             <Style Selector="^.Primary">
-                <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                <Setter Property="Background" Value="{StaticResource InkBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource InkBrush}" />
                 <Setter Property="Foreground" Value="{StaticResource OnAccentBrush}" />
             </Style>
             <Style Selector="^.Primary:pointerover /template/ local|HudPanel#PART_Frame">
-                <Setter Property="Background" Value="{StaticResource AccentHoverSolidBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource AccentHoverSolidBrush}" />
+                <Setter Property="Background" Value="{StaticResource InkHoverBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource InkHoverBrush}" />
             </Style>
             <Style Selector="^.Primary:pressed /template/ local|HudPanel#PART_Frame">
-                <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource InkBrush}" />
+                <Setter Property="Background" Value="{StaticResource InkSecondaryBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource InkSecondaryBrush}" />
             </Style>
             <Style Selector="^.Primary:focus-visible /template/ local|HudPanel#PART_Frame">
-                <Setter Property="BorderBrush" Value="{StaticResource InkBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
             </Style>
             <Style Selector="^.Primary:disabled">
                 <Setter Property="Foreground" Value="{StaticResource InkDisabledBrush}" />
@@ -369,11 +372,11 @@
                 <Setter Property="Foreground" Value="{StaticResource InkBrush}" />
             </Style>
             <Style Selector="^:pointerover /template/ local|HudPanel#PART_Frame">
-                <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
-                <Setter Property="BorderBrush" Value="{StaticResource Ink60Brush}" />
+                <Setter Property="Background" Value="{StaticResource Ink08Brush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource Ink40Brush}" />
             </Style>
             <Style Selector="^:pressed /template/ local|HudPanel#PART_Frame">
-                <Setter Property="Background" Value="{StaticResource AccentPressedSoftBrush}" />
+                <Setter Property="Background" Value="{StaticResource Ink20Brush}" />
             </Style>
             <Style Selector="^:focus-visible /template/ local|HudPanel#PART_Frame">
                 <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
@@ -424,8 +427,8 @@
         <Style Selector="TextBlock.PageTitle">
             <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
             <Setter Property="FontWeight" Value="Bold" />
-            <Setter Property="FontSize" Value="20" />
-            <Setter Property="LetterSpacing" Value="1.5" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="LetterSpacing" Value="2" />
             <Setter Property="Foreground" Value="{StaticResource InkBrush}" />
         </Style>
         <Style Selector="TextBlock.PageCaption">
@@ -439,7 +442,7 @@
         <Style Selector="TextBlock.CardTitle">
             <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
             <Setter Property="FontWeight" Value="Bold" />
-            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontSize" Value="12" />
             <Setter Property="LetterSpacing" Value="1.5" />
             <Setter Property="Foreground" Value="{StaticResource InkBrush}" />
             <Setter Property="TextTrimming" Value="CharacterEllipsis" />
@@ -453,16 +456,14 @@
 
         <!-- Small muted caps label ("TEMP", "LOAD") -->
         <Style Selector="TextBlock.Label">
-            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
-            <Setter Property="FontSize" Value="11" />
-            <Setter Property="LetterSpacing" Value="1" />
+            <Setter Property="FontSize" Value="12" />
             <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
         <!-- Big numeric readout + its small unit -->
         <Style Selector="TextBlock.Readout">
             <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
-            <Setter Property="FontSize" Value="34" />
+            <Setter Property="FontSize" Value="32" />
             <Setter Property="Foreground" Value="{StaticResource InkBrush}" />
         </Style>
         <Style Selector="TextBlock.ReadoutSmall">
@@ -472,8 +473,7 @@
         </Style>
         <Style Selector="TextBlock.Unit">
             <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
-            <Setter Property="FontSize" Value="11" />
-            <Setter Property="LetterSpacing" Value="1" />
+            <Setter Property="FontSize" Value="12" />
             <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
             <Setter Property="Margin" Value="6 0 0 6" />
             <Setter Property="VerticalAlignment" Value="Bottom" />
@@ -498,8 +498,7 @@
         </Style>
         <Style Selector="TextBlock.Tag">
             <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
-            <Setter Property="FontSize" Value="10" />
-            <Setter Property="LetterSpacing" Value="1" />
+            <Setter Property="FontSize" Value="12" />
             <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
         </Style>
         <Style Selector="TextBlock.Accent">
@@ -517,20 +516,18 @@
         <!-- ============================================================ HUD panels -->
         <Style Selector="local|HudPanel.Card">
             <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource EdgeBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Cut" Value="12" />
+            <Setter Property="Cut" Value="8" />
             <Setter Property="CutTopLeft" Value="False" />
             <Setter Property="CutTopRight" Value="True" />
             <Setter Property="CutBottomRight" Value="False" />
-            <Setter Property="CutBottomLeft" Value="True" />
-            <Setter Property="TickBrush" Value="{StaticResource Ink40Brush}" />
-            <Setter Property="TickLength" Value="8" />
-            <Setter Property="Padding" Value="20 16 20 20" />
+            <Setter Property="CutBottomLeft" Value="False" />
+            <Setter Property="Padding" Value="24 20 24 24" />
         </Style>
         <Style Selector="local|HudPanel.Tile">
             <Setter Property="Background" Value="{StaticResource SurfaceRaisedBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource EdgeBrush}" />
             <Setter Property="Cut" Value="6" />
             <Setter Property="CutBottomLeft" Value="False" />
             <Setter Property="Padding" Value="12 10 12 12" />
@@ -538,8 +535,8 @@
         <!-- Small boxed readout next to a slider -->
         <Style Selector="local|HudPanel.Readout">
             <Setter Property="Background" Value="{StaticResource SurfaceRaisedBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource HairlineBrush}" />
-            <Setter Property="Cut" Value="4" />
+            <Setter Property="BorderBrush" Value="{StaticResource EdgeBrush}" />
+            <Setter Property="Cut" Value="0" />
             <Setter Property="CutBottomLeft" Value="False" />
             <Setter Property="Padding" Value="8 4" />
             <Setter Property="MinWidth" Value="64" />
@@ -582,11 +579,10 @@
 
         <!-- Segmented meters -->
         <Style Selector="local|SegmentBar">
-            <Setter Property="Height" Value="6" />
-            <Setter Property="Fill" Value="{StaticResource InkBrush}" />
-            <Setter Property="TrackBrush" Value="{StaticResource HairlineBrush}" />
-            <Setter Property="SegmentWidth" Value="4" />
-            <Setter Property="Gap" Value="2" />
+            <Setter Property="Height" Value="3" />
+            <Setter Property="Fill" Value="{StaticResource Ink60Brush}" />
+            <Setter Property="TrackBrush" Value="{StaticResource EdgeBrush}" />
+            <Setter Property="Gap" Value="0" />
         </Style>
         <Style Selector="local|SegmentBar.Accent">
             <Setter Property="Fill" Value="{StaticResource AccentBrush}" />
@@ -647,7 +643,7 @@
             <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
             <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="FontSize" Value="12" />
-            <Setter Property="MinHeight" Value="40" />
+            <Setter Property="MinHeight" Value="36" />
             <Setter Property="Padding" Value="16 0" />
             <Setter Property="Margin" Value="0" />
             <Setter Property="CornerRadius" Value="0" />
@@ -673,7 +669,7 @@
         </Style>
 
         <Style Selector="Slider">
-            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource InkBrush}" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 

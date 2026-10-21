@@ -26,14 +26,11 @@
         <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 0 1">
             <Panel>
-                <local:Scanlines Fill="{StaticResource ScanlineBrush}" Pitch="3" />
                 <Grid ColumnDefinitions="*,Auto" Margin="24 14">
                     <StackPanel>
                         <TextBlock Text="INTERNALS" Classes="PageTitle" />
-                        <TextBlock Text="Advanced driver and daemon controls (root actions)" Classes="PageCaption" />
+                        <TextBlock Text="Root actions: driver parameters and restarts" Classes="PageCaption" />
                     </StackPanel>
-                    <local:Stripes Grid.Column="1" Width="96" Height="8" VerticalAlignment="Center"
-                                   Fill="{StaticResource DangerBrush}" Opacity="0.5" StripeWidth="2" Gap="4" />
                 </Grid>
             </Panel>
         </Border>
@@ -48,8 +45,6 @@
                 <!-- Developer Mode -->
                 <local:HudPanel Classes="Card">
                     <Grid ColumnDefinitions="Auto,*,Auto">
-                        <material:MaterialIcon Kind="CodeBraces" Width="16" Height="16" Classes="Muted"
-                                               Margin="0 1 10 0" VerticalAlignment="Top" />
                         <StackPanel Grid.Column="1">
                             <TextBlock Text="DEVELOPER MODE" Classes="CardTitle" />
                             <TextBlock Text="Show every control, even for features the daemon did not report"
@@ -65,7 +60,6 @@
                 <local:HudPanel Classes="Card">
                     <StackPanel>
                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                            <material:MaterialIcon Kind="Chip" />
                             <StackPanel Grid.Column="1">
                                 <TextBlock Text="DRIVER PARAMETERS" Classes="CardTitle" />
                                 <TextBlock Text="Reload linuwu_sense with a parameter (until next reboot)"
@@ -91,7 +85,6 @@
                 <local:HudPanel Classes="Card">
                     <StackPanel>
                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                            <material:MaterialIcon Kind="Pin" />
                             <StackPanel Grid.Column="1">
                                 <TextBlock Text="PERMANENT MODEL OVERRIDE" Classes="CardTitle" />
                                 <TextBlock Classes="CardCaption"
@@ -118,7 +111,6 @@
                 <local:HudPanel Classes="Card">
                     <StackPanel>
                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                            <material:MaterialIcon Kind="Restart" />
                             <StackPanel Grid.Column="1">
                                 <TextBlock Text="RESTART" Classes="CardTitle" />
                                 <TextBlock Text="Restart components to apply changes" Classes="CardCaption" />
@@ -142,8 +134,6 @@
                 <!-- Debug Tools -->
                 <local:HudPanel Classes="Card">
                     <Grid ColumnDefinitions="Auto,*,Auto">
-                        <material:MaterialIcon Kind="Bug" Width="16" Height="16" Classes="Muted"
-                                               Margin="0 1 10 0" VerticalAlignment="Top" />
                         <StackPanel Grid.Column="1">
                             <TextBlock Text="DEBUG" Classes="CardTitle" />
                             <TextBlock Text="/var/log/DAMX_Daemon_Log.log" Classes="CardCaption" />

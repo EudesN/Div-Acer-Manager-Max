@@ -14,97 +14,90 @@
     -->
 
     <UserControl.Styles>
-        <!-- One metric: LABEL ........ VALUE UNIT, segmented bar underneath -->
+        <!-- One metric: Label ........ value unit, thin bar underneath -->
         <Style Selector="Grid.Metric">
-            <Setter Property="Margin" Value="0 0 0 12" />
+            <Setter Property="Margin" Value="0 0 0 16" />
         </Style>
         <Style Selector="Grid.Metric local|SegmentBar">
-            <Setter Property="Margin" Value="0 6 0 0" />
+            <Setter Property="Margin" Value="0 8 0 0" />
         </Style>
-        <Style Selector="Grid.Metric TextBlock.Unit">
+        <Style Selector="Grid.Metric TextBlock.Unit, Grid.KeyValue TextBlock.Unit">
             <Setter Property="Margin" Value="4 0 0 0" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
         <Style Selector="StackPanel.ReadoutRow">
             <Setter Property="Orientation" Value="Horizontal" />
-            <Setter Property="Margin" Value="0 0 0 2" />
+            <Setter Property="Margin" Value="0 0 0 24" />
         </Style>
 
         <Style Selector="material|MaterialIcon.FanIcon">
-            <Setter Property="Width" Value="14" />
-            <Setter Property="Height" Value="14" />
+            <Setter Property="Width" Value="12" />
+            <Setter Property="Height" Value="12" />
             <Setter Property="Margin" Value="0 0 6 0" />
             <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Foreground" Value="{StaticResource Ink60Brush}" />
+            <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
         </Style>
 
         <Style Selector="Rectangle.LegendKey">
-            <Setter Property="Width" Value="14" />
+            <Setter Property="Width" Value="12" />
             <Setter Property="Height" Value="2" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
         <Style Selector="TextBlock.FieldLabel">
-            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
-            <Setter Property="FontSize" Value="11" />
-            <Setter Property="LetterSpacing" Value="1" />
+            <Setter Property="FontSize" Value="12" />
             <Setter Property="Width" Value="40" />
             <Setter Property="VerticalAlignment" Value="Center" />
             <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
         </Style>
+
+        <!-- Card title row: TITLE (left) + quiet one-line detail (below) -->
+        <Style Selector="TextBlock.ModelLine">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Margin" Value="0 4 0 0" />
+            <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
+            <Setter Property="TextWrapping" Value="NoWrap" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        </Style>
     </UserControl.Styles>
 
     <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-        <Grid Margin="24 20 24 24" MaxWidth="1180"
+        <Grid Margin="24" MaxWidth="1180"
               RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="*,*,*">
 
-            <!-- Page header -->
-            <Grid Grid.Row="0" Grid.ColumnSpan="3" ColumnDefinitions="*,Auto" Margin="0 0 0 20">
-                <StackPanel>
-                    <TextBlock Text="DASHBOARD" Classes="PageTitle" />
-                    <TextBlock Text="Live telemetry, thermal profile and fan control" Classes="PageCaption" />
-                </StackPanel>
-                <TextBlock Grid.Column="1" Classes="Tag" Text="SEC_01 // MON · 2 s" VerticalAlignment="Bottom" />
-            </Grid>
+            <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Text="DASHBOARD" Classes="PageTitle" Margin="0 0 0 16" />
 
             <!-- ======================================================== CPU -->
             <local:HudPanel Classes="Card" Grid.Row="1" Grid.Column="0" Margin="0 0 8 16">
                 <StackPanel>
-                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                        <material:MaterialIcon Kind="Cpu64Bit" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock x:Name="CpuTitle" Text="CPU" Classes="CardTitle" />
-                            <TextBlock x:Name="CpuModel" Text="{Binding CpuName}" Classes="CardCaption"
-                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
-                                       ToolTip.Tip="{Binding CpuName}" />
-                        </StackPanel>
-                    </Grid>
+                    <StackPanel Margin="0 0 0 16">
+                        <TextBlock x:Name="CpuTitle" Text="CPU" Classes="CardTitle" />
+                        <TextBlock x:Name="CpuModel" Text="{Binding CpuName}" Classes="ModelLine"
+                                   ToolTip.Tip="{Binding CpuName}" />
+                    </StackPanel>
 
                     <StackPanel Classes="ReadoutRow">
                         <TextBlock x:Name="CpuTemperature" Classes="Readout" Classes.Hot="{Binding IsCpuHot}"
-                                   Text="{Binding CpuTempText}" />
+                                   Text="{Binding CpuTempText}" ToolTip.Tip="Package temperature" />
                         <TextBlock Classes="Unit" Text="°C" />
                     </StackPanel>
-                    <TextBlock Classes="Label" Text="PACKAGE TEMP" Margin="0 0 0 16" />
 
-                    <Grid Classes="Metric" ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto,Auto">
-                        <TextBlock Classes="Label" Text="LOAD" />
-                        <local:DotLeader Grid.Column="1" />
-                        <TextBlock Grid.Column="2" Classes="Value" Text="{Binding CpuUsageText}" />
-                        <TextBlock Grid.Column="3" Classes="Unit" Text="%" />
-                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="4" Maximum="100"
+                    <Grid Classes="Metric" ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto">
+                        <TextBlock Classes="Label" Text="Load" />
+                        <TextBlock Grid.Column="1" Classes="Value" Text="{Binding CpuUsageText}" />
+                        <TextBlock Grid.Column="2" Classes="Unit" Text="%" />
+                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="3" Maximum="100" Classes.Hot="{Binding IsCpuHot}"
                                           Value="{Binding CpuUsage}" />
                     </Grid>
 
-                    <Grid Classes="Metric" ColumnDefinitions="Auto,Auto,*,Auto,Auto" RowDefinitions="Auto,Auto"
+                    <Grid Classes="Metric" ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto,Auto"
                           Margin="0">
                         <material:MaterialIcon x:Name="CpuFanIcon" Classes="FanIcon" Kind="Fan" />
-                        <TextBlock Grid.Column="1" Classes="Label" Text="FAN" />
-                        <local:DotLeader Grid.Column="2" />
-                        <TextBlock x:Name="CpuFanSpeed" Grid.Column="3" Classes="Value" Text="{Binding CpuFanText}" />
-                        <TextBlock Grid.Column="4" Classes="Unit" Text="RPM" />
-                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="5" Maximum="6000"
+                        <TextBlock Grid.Column="1" Classes="Label" Text="Fan" />
+                        <TextBlock x:Name="CpuFanSpeed" Grid.Column="2" Classes="Value" Text="{Binding CpuFanText}" />
+                        <TextBlock Grid.Column="3" Classes="Unit" Text="rpm" />
+                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="4" Maximum="6000"
                                           Value="{Binding CpuFanLevel}" />
                     </Grid>
                 </StackPanel>
@@ -113,47 +106,39 @@
             <!-- ======================================================== GPU -->
             <local:HudPanel Classes="Card" Grid.Row="1" Grid.Column="1" Margin="8 0 8 16">
                 <StackPanel>
-                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                        <material:MaterialIcon Kind="Gpu" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock x:Name="GpuTitle" Text="GPU" Classes="CardTitle" />
-                            <TextBlock x:Name="GpuModel" Text="{Binding GpuName}" Classes="CardCaption"
-                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
-                                       ToolTip.Tip="{Binding GpuName}" />
-                        </StackPanel>
-                    </Grid>
+                    <StackPanel Margin="0 0 0 16">
+                        <TextBlock x:Name="GpuTitle" Text="GPU" Classes="CardTitle" />
+                        <TextBlock x:Name="GpuModel" Text="{Binding GpuName}" Classes="ModelLine"
+                                   ToolTip.Tip="{Binding GpuDriverText}" />
+                    </StackPanel>
 
                     <StackPanel Classes="ReadoutRow">
                         <TextBlock x:Name="GpuTemperature" Classes="Readout" Classes.Hot="{Binding IsGpuHot}"
-                                   Text="{Binding GpuTempText}" />
+                                   Text="{Binding GpuTempText}" ToolTip.Tip="{Binding GpuStateText}" />
                         <TextBlock Classes="Unit" Text="°C" IsVisible="{Binding !IsGpuAsleep}" />
                     </StackPanel>
-                    <TextBlock Classes="Label" Text="{Binding GpuStateText}" Margin="0 0 0 16" />
 
-                    <Grid Classes="Metric" ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto,Auto">
-                        <TextBlock Classes="Label" Text="LOAD" />
-                        <local:DotLeader Grid.Column="1" />
-                        <TextBlock Grid.Column="2" Classes="Value" Text="{Binding GpuUsageText}" />
-                        <TextBlock Grid.Column="3" Classes="Unit" Text="%" />
-                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="4" Maximum="100" Classes="Accent"
+                    <Grid Classes="Metric" ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto">
+                        <TextBlock Classes="Label" Text="Load" />
+                        <TextBlock Grid.Column="1" Classes="Value" Text="{Binding GpuUsageText}" />
+                        <TextBlock Grid.Column="2" Classes="Unit" Text="%" />
+                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="3" Maximum="100" Classes.Hot="{Binding IsGpuHot}"
                                           Value="{Binding GpuUsage}" />
                     </Grid>
 
-                    <Grid Classes="Metric" ColumnDefinitions="Auto,Auto,*,Auto,Auto" RowDefinitions="Auto,Auto">
+                    <Grid Classes="Metric" ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto,Auto"
+                          Margin="0">
                         <material:MaterialIcon x:Name="GpuFanIcon" Classes="FanIcon" Kind="Fan" />
-                        <TextBlock Grid.Column="1" Classes="Label" Text="FAN" />
-                        <local:DotLeader Grid.Column="2" />
-                        <TextBlock x:Name="GpuFanSpeed" Grid.Column="3" Classes="Value" Text="{Binding GpuFanText}" />
-                        <TextBlock Grid.Column="4" Classes="Unit" Text="RPM" />
-                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="5" Maximum="6000"
+                        <TextBlock Grid.Column="1" Classes="Label" Text="Fan" />
+                        <TextBlock x:Name="GpuFanSpeed" Grid.Column="2" Classes="Value" Text="{Binding GpuFanText}" />
+                        <TextBlock Grid.Column="3" Classes="Unit" Text="rpm" />
+                        <local:SegmentBar Grid.Row="1" Grid.ColumnSpan="4" Maximum="6000"
                                           Value="{Binding GpuFanLevel}" />
                     </Grid>
 
-                    <Grid ColumnDefinitions="Auto,*,Auto">
-                        <TextBlock Classes="Label" Text="DRIVER" />
-                        <local:DotLeader Grid.Column="1" />
-                        <TextBlock x:Name="GpuDriver" Grid.Column="2" Classes="Value" Text="{Binding GpuDriverText}" />
-                    </Grid>
+                    <!-- Only shown while the dGPU is runtime-suspended -->
+                    <TextBlock Classes="Hint" Margin="0 12 0 0" Text="{Binding GpuStateText}"
+                               IsVisible="{Binding IsGpuAsleep}" />
                 </StackPanel>
             </local:HudPanel>
 
@@ -161,39 +146,28 @@
             <local:HudPanel Classes="Card" Grid.Row="1" Grid.Column="2" Margin="8 0 0 16"
                             IsVisible="{Binding HasBattery}">
                 <StackPanel>
-                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                        <material:MaterialIcon Kind="Battery70" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock x:Name="BatteryTitle" Text="BATTERY" Classes="CardTitle" />
-                            <TextBlock Text="Charge and power source" Classes="CardCaption" />
-                        </StackPanel>
-                    </Grid>
+                    <TextBlock x:Name="BatteryTitle" Text="BATTERY" Classes="CardTitle" Margin="0 0 0 16" />
 
-                    <StackPanel Classes="ReadoutRow">
+                    <StackPanel Classes="ReadoutRow" Margin="0 0 0 8">
                         <TextBlock x:Name="BatteryPercentage" Classes="Readout" Text="{Binding BatteryPercentText}" />
                         <TextBlock Classes="Unit" Text="%" />
                     </StackPanel>
-                    <TextBlock Classes="Label" Text="CHARGE" Margin="0 0 0 8" />
                     <local:SegmentBar x:Name="BatteryLevelBar" Maximum="100" Value="{Binding BatteryLevel}"
-                                      Margin="0 0 0 16" />
+                                      Margin="0 0 0 20" />
 
-                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                        <TextBlock Classes="Label" Text="STATE" />
-                        <local:DotLeader Grid.Column="1" />
-                        <TextBlock x:Name="PowerSource" Grid.Column="2" Classes="Value" Text="{Binding BatteryStatus}" />
+                    <Grid Classes="KeyValue" ColumnDefinitions="*,Auto">
+                        <TextBlock Classes="Label" Text="State" />
+                        <TextBlock x:Name="PowerSource" Grid.Column="1" Classes="Value" Text="{Binding BatteryStatus}" />
                     </Grid>
-                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto,Auto">
-                        <TextBlock Classes="Label" Text="REMAINING" />
-                        <local:DotLeader Grid.Column="1" />
-                        <TextBlock x:Name="BatteryTimeRemaining" Grid.Column="2" Classes="Value"
+                    <Grid Classes="KeyValue" ColumnDefinitions="*,Auto,Auto">
+                        <TextBlock Classes="Label" Text="Remaining" />
+                        <TextBlock x:Name="BatteryTimeRemaining" Grid.Column="1" Classes="Value"
                                    Text="{Binding BatteryTimeRemainingString}" />
-                        <TextBlock Grid.Column="3" Classes="Unit" Text="H:MM" Margin="6 0 0 0"
-                                   VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Classes="Unit" Text="h" />
                     </Grid>
-                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                        <TextBlock Classes="Label" Text="LIMITER" />
-                        <local:DotLeader Grid.Column="1" />
-                        <TextBlock Grid.Column="2" Classes="Value" Text="{Binding BatteryLimiterText}" />
+                    <Grid Classes="KeyValue" ColumnDefinitions="*,Auto">
+                        <TextBlock Classes="Label" Text="Charge limit" />
+                        <TextBlock Grid.Column="1" Classes="Value" Text="{Binding BatteryLimiterText}" />
                     </Grid>
                 </StackPanel>
             </local:HudPanel>
@@ -202,18 +176,12 @@
             <local:HudPanel x:Name="ThermalProfilePanel" Classes="Card" Grid.Row="2" Grid.Column="0"
                             Grid.ColumnSpan="3" Margin="0 0 0 16">
                 <StackPanel>
-                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                        <material:MaterialIcon Kind="Speedometer" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock Text="THERMAL PROFILE" Classes="CardTitle" />
-                            <TextBlock Classes="CardCaption"
-                                       Text="Profiles offered by the firmware (platform_profile_choices)" />
-                        </StackPanel>
+                    <Grid ColumnDefinitions="*,Auto" Margin="0 0 0 16">
+                        <TextBlock Text="THERMAL PROFILE" Classes="CardTitle" VerticalAlignment="Center" />
                         <!-- Power source indicator, driven by PowerSourceDetection (read-only) -->
-                        <ToggleSwitch x:Name="PluggedInToggleSwitch" Grid.Column="2" VerticalAlignment="Center"
+                        <ToggleSwitch x:Name="PluggedInToggleSwitch" Grid.Column="1" VerticalAlignment="Center"
                                       IsChecked="True" IsHitTestVisible="False" Focusable="False"
-                                      OnContent="AC POWER" OffContent="BATTERY"
-                                      FontFamily="{StaticResource MonoFont}" FontSize="11" />
+                                      OnContent="AC power" OffContent="Battery" FontSize="12" />
                     </Grid>
 
                     <!-- Segments are created at runtime from the daemon's reported choices -->
@@ -228,13 +196,7 @@
             <local:HudPanel x:Name="FanControlPanel" Classes="Card" Grid.Row="3" Grid.Column="0"
                             Margin="0 0 8 16" VerticalAlignment="Stretch">
                 <StackPanel>
-                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                        <material:MaterialIcon Kind="Fan" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock Text="FAN CONTROL" Classes="CardTitle" />
-                            <TextBlock Text="CPU + GPU fan mode" Classes="CardCaption" />
-                        </StackPanel>
-                    </Grid>
+                    <TextBlock Text="FAN CONTROL" Classes="CardTitle" Margin="0 0 0 16" />
 
                     <UniformGrid Rows="1">
                         <RadioButton x:Name="AutoFanSpeedRadioButton" GroupName="FanModeGroup" IsChecked="True"
@@ -276,26 +238,22 @@
             <!-- ======================================================== Temperature history -->
             <local:HudPanel Classes="Card" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="8 0 0 16">
                 <DockPanel>
-                    <Grid DockPanel.Dock="Top" Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                        <material:MaterialIcon Kind="ChartLine" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock x:Name="TemperatureMonitorTitle" Text="TEMPERATURE HISTORY"
-                                       Classes="CardTitle" />
-                            <TextBlock Text="Last 2 minutes" Classes="CardCaption" />
-                        </StackPanel>
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0 0 0 8">
+                        <TextBlock x:Name="TemperatureMonitorTitle" Text="TEMPERATURE" Classes="CardTitle"
+                                   VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Rectangle Classes="LegendKey" Fill="{StaticResource InkBrush}" />
-                                <TextBlock Text="CPU" Classes="Tag" />
+                                <TextBlock Text="CPU" Classes="Hint" />
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Rectangle Classes="LegendKey" Fill="{StaticResource AccentBrush}" />
-                                <TextBlock Text="GPU" Classes="Tag" />
+                                <TextBlock Text="GPU" Classes="Hint" />
                             </StackPanel>
                         </StackPanel>
                     </Grid>
 
-                    <avalonia:CartesianChart x:Name="TemperatureChart" VerticalAlignment="Stretch" MinHeight="220" />
+                    <avalonia:CartesianChart x:Name="TemperatureChart" VerticalAlignment="Stretch" MinHeight="200" />
                 </DockPanel>
             </local:HudPanel>
         </Grid>

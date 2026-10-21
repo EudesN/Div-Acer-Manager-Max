@@ -20,13 +20,13 @@
     <Window.Styles>
         <!-- The nav strip sits on top of the sidebar panel drawn behind the TabControl. -->
         <Style Selector="TabControl.Sidebar /template/ ItemsPresenter#PART_ItemsPresenter">
-            <Setter Property="Width" Value="192" />
-            <Setter Property="Margin" Value="8 44 8 12" />
+            <Setter Property="Width" Value="152" />
+            <Setter Property="Margin" Value="8 16 8 8" />
         </Style>
 
         <!-- Page content area to the right of the sidebar -->
         <Style Selector="TabControl.Sidebar ScrollViewer.Page > StackPanel">
-            <Setter Property="Margin" Value="24 20 24 24" />
+            <Setter Property="Margin" Value="24" />
             <Setter Property="MaxWidth" Value="1180" />
         </Style>
 
@@ -83,20 +83,14 @@
         <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 0 1">
             <Panel>
-                <!-- very faint scanline texture, header only -->
-                <local:Scanlines Fill="{StaticResource ScanlineBrush}" Pitch="3" />
-
                 <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="20 0">
                     <Image Source="iconTransparent.png" Width="22" Height="22" VerticalAlignment="Center"
                            Margin="0 0 12 0" />
                     <StackPanel Grid.Column="1" Classes="Brand" Orientation="Horizontal" Spacing="6">
                         <TextBlock Text="DAMX" Foreground="{StaticResource InkBrush}" />
-                        <TextBlock Text="//" Foreground="{StaticResource AccentBrush}" />
+                        <TextBlock Text="//" Foreground="{StaticResource InkMutedBrush}" />
                         <TextBlock Text="ACER CONTROL" Foreground="{StaticResource InkSecondaryBrush}" />
                     </StackPanel>
-                    <local:Stripes Grid.Column="2" Width="64" Height="8" Margin="20 0 0 0"
-                                   HorizontalAlignment="Left" VerticalAlignment="Center"
-                                   StripeWidth="2" Gap="4" />
 
                     <TextBlock x:Name="HeaderModelText" Grid.Column="3" Text="—" Classes="Mono"
                                FontSize="12" LetterSpacing="1" Foreground="{StaticResource InkSecondaryBrush}"
@@ -117,20 +111,11 @@
         </Border>
 
         <!-- ============================================================ Body -->
-        <Grid Grid.Row="1" ColumnDefinitions="208,*">
+        <Grid Grid.Row="1" ColumnDefinitions="168,*">
 
             <!-- Sidebar panel (the navigation items are the TabControl's strip, laid over it) -->
             <Border Grid.Column="0" Background="{StaticResource BgBrush}"
                     BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 1 0">
-                <Grid RowDefinitions="Auto,*,Auto">
-                    <TextBlock Text="NAVIGATION" Classes="Tag" Margin="24 20 20 0" />
-
-                    <StackPanel Grid.Row="2" Margin="24 0 20 16" Spacing="4">
-                        <Border Classes="Rule" Margin="0 0 0 8" />
-                        <TextBlock Text="ACER_WMI // LINUWU_SENSE" Classes="Tag" />
-                        <TextBlock Text="NITRO // PREDATOR" Classes="Tag" />
-                    </StackPanel>
-                </Grid>
             </Border>
 
             <TabControl Grid.Column="0" Grid.ColumnSpan="2" Classes="Sidebar" TabStripPlacement="Left"
@@ -145,7 +130,6 @@
                 <TabItem>
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="01" Classes="NavIndex" />
                             <TextBlock Text="DASHBOARD" />
                         </StackPanel>
                     </TabItem.Header>
@@ -158,7 +142,6 @@
                 <TabItem x:Name="BatteryPanel">
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="02" Classes="NavIndex" />
                             <TextBlock Text="BATTERY" />
                         </StackPanel>
                     </TabItem.Header>
@@ -166,14 +149,12 @@
                         <StackPanel>
                             <StackPanel Margin="0 0 0 20">
                                 <TextBlock Text="BATTERY" Classes="PageTitle" />
-                                <TextBlock Text="Battery health and USB charging" Classes="PageCaption" />
                             </StackPanel>
 
                             <!-- Battery Calibration -->
                             <local:HudPanel x:Name="CalibrationControls" Classes="Card" Margin="0 0 0 16">
                                 <StackPanel>
                                     <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                        <material:MaterialIcon Kind="BatterySync" />
                                         <StackPanel Grid.Column="1">
                                             <TextBlock Text="BATTERY CALIBRATION" Classes="CardTitle" />
                                             <TextBlock Classes="CardCaption"
@@ -209,7 +190,6 @@
                                                 Margin="0 0 8 16">
                                     <StackPanel>
                                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                            <material:MaterialIcon Kind="BatteryHeartVariant" />
                                             <StackPanel Grid.Column="1">
                                                 <TextBlock Text="CHARGE LIMIT" Classes="CardTitle" />
                                                 <TextBlock Classes="CardCaption"
@@ -227,7 +207,6 @@
                                                 Margin="8 0 0 16">
                                     <StackPanel>
                                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                            <material:MaterialIcon Kind="UsbPort" />
                                             <StackPanel Grid.Column="1">
                                                 <TextBlock Text="USB POWER-OFF CHARGING" Classes="CardTitle" />
                                                 <TextBlock Classes="CardCaption"
@@ -253,7 +232,6 @@
                 <TabItem x:Name="KeyboardLightingPanel">
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="03" Classes="NavIndex" />
                             <TextBlock Text="KEYBOARD" />
                         </StackPanel>
                     </TabItem.Header>
@@ -261,13 +239,12 @@
                         <StackPanel>
                             <StackPanel Margin="0 0 0 20">
                                 <TextBlock Text="KEYBOARD LIGHTING" Classes="PageTitle" />
-                                <TextBlock Text="Zone colours, effects and backlight timeout" Classes="PageCaption" />
                             </StackPanel>
 
                             <local:HudPanel Classes="Notice">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <material:MaterialIcon Kind="FlaskOutline" Width="14" Height="14" />
-                                    <TextBlock Text="EXPERIMENTAL // THIS SECTION NEEDS MORE TESTING" />
+                                    <TextBlock Text="Experimental — this section needs more testing" />
                                 </StackPanel>
                             </local:HudPanel>
 
@@ -275,7 +252,6 @@
                             <local:HudPanel x:Name="ZoneColorControlPanel" Classes="Card" Margin="0 0 0 16">
                                 <StackPanel>
                                     <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                        <material:MaterialIcon Kind="Palette" />
                                         <StackPanel Grid.Column="1">
                                             <TextBlock Text="ZONE COLOURS" Classes="CardTitle" />
                                             <TextBlock Text="Static colour for each of the four keyboard zones"
@@ -336,7 +312,6 @@
                             <local:HudPanel x:Name="KeyboardEffectsPanel" Classes="Card" Margin="0 0 0 16">
                                 <StackPanel>
                                     <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                        <material:MaterialIcon Kind="AutoFix" />
                                         <StackPanel Grid.Column="1">
                                             <TextBlock Text="LIGHTING EFFECTS" Classes="CardTitle" />
                                             <TextBlock Text="Dynamic effects for the whole keyboard"
@@ -405,7 +380,6 @@
                             <local:HudPanel x:Name="BacklightTimeoutControls" Classes="Card" Margin="0 0 0 16">
                                 <StackPanel>
                                     <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                        <material:MaterialIcon Kind="TimerOutline" />
                                         <StackPanel Grid.Column="1">
                                             <TextBlock Text="BACKLIGHT TIMEOUT" Classes="CardTitle" />
                                             <TextBlock Classes="CardCaption"
@@ -424,7 +398,6 @@
                 <TabItem x:Name="SystemSettingsPanel">
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="04" Classes="NavIndex" />
                             <TextBlock Text="SYSTEM" />
                         </StackPanel>
                     </TabItem.Header>
@@ -432,7 +405,6 @@
                         <StackPanel>
                             <StackPanel Margin="0 0 0 20">
                                 <TextBlock Text="SYSTEM" Classes="PageTitle" />
-                                <TextBlock Text="Display, boot and system information" Classes="PageCaption" />
                             </StackPanel>
 
                             <Grid ColumnDefinitions="*,*">
@@ -441,7 +413,6 @@
                                                 Margin="0 0 8 16">
                                     <StackPanel>
                                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                            <material:MaterialIcon Kind="MonitorShimmer" />
                                             <StackPanel Grid.Column="1">
                                                 <TextBlock Text="LCD OVERRIDE" Classes="CardTitle" />
                                                 <TextBlock Text="Reduce LCD latency and minimize ghosting"
@@ -463,7 +434,6 @@
                                                 Margin="8 0 0 16">
                                     <StackPanel>
                                         <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                            <material:MaterialIcon Kind="MusicNoteOutline" />
                                             <StackPanel Grid.Column="1">
                                                 <TextBlock Text="BOOT ANIMATION + SOUND" Classes="CardTitle" />
                                                 <TextBlock Text="Custom boot animation and sound"
@@ -480,7 +450,6 @@
                             <local:HudPanel Classes="Card" Margin="0 0 0 16">
                                 <StackPanel>
                                     <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                        <material:MaterialIcon Kind="InformationOutline" />
                                         <StackPanel Grid.Column="1">
                                             <TextBlock Text="SYSTEM INFORMATION" Classes="CardTitle" />
                                             <TextBlock Text="Detected hardware and component versions"
@@ -562,8 +531,7 @@
                             Cut="16" Padding="28 24"
                             Background="{StaticResource SurfaceBrush}"
                             BorderBrush="{StaticResource LineStrongBrush}"
-                            AccentBrush="{StaticResource DangerBrush}" AccentLength="80"
-                            TickBrush="{StaticResource Ink40Brush}" TickLength="8">
+                            BorderThickness="1">
                 <StackPanel Spacing="8">
                     <Grid ColumnDefinitions="Auto,*">
                         <material:MaterialIcon Kind="LanDisconnect" Classes="Danger"

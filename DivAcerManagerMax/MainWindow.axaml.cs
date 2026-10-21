@@ -458,7 +458,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         try
         {
             SetText(_daemonStatusText, "CONNECTING");
-            if (_daemonStatusDot != null) _daemonStatusDot.Fill = HudPalette.AccentBrush;
+            if (_daemonStatusDot != null) _daemonStatusDot.Fill = HudPalette.InkMutedBrush;
 
             _isConnected = await _client.ConnectAsync();
             SetDaemonStatus(_client.State);
@@ -613,7 +613,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (this.TryFindResource("SegmentRadio", out var theme) && theme is ControlTheme controlTheme)
             button.Theme = controlTheme;
-        button.Classes.Add("Glow");
         ToolTip.SetTip(button, info.Description);
         button.Click += ProfileButton_Click;
         return button;

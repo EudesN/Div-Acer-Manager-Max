@@ -2,21 +2,27 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Timers;
 using Avalonia.Controls;
 using Avalonia.Threading;
 
-public class PowerSourceDetection
+/// <summary>
+///     Polls the AC adapter state every 5 s and mirrors it into a (read-only) ToggleSwitch.
+///     Dispose it when the window closes.
+/// </summary>
+public sealed class PowerSourceDetection : IDisposable
 {
     private readonly List<string> _possiblePowerSupplyPaths;
     private readonly Timer _powerSourceCheckTimer;
     private readonly ToggleSwitch _powerToggleSwitch;
+    private bool _disposed;
 
     public PowerSourceDetection(ToggleSwitch powerToggleSwitch)
     {
         _powerToggleSwitch = powerToggleSwitch;
 
-        // Common paths for power supply status on Linux systems
+        // Common paths for power supply status on Linux systems (Acer laptops usually expose ACAD)
         _possiblePowerSupplyPaths = new List<string>
         {
             "/sys/class/power_supply/AC/online",
@@ -25,7 +31,6 @@ public class PowerSourceDetection
             "/sys/class/power_supply/AC0/online"
         };
 
-        // Initialize and start the timer to check power source every 5 seconds
         _powerSourceCheckTimer = new Timer(5000);
         _powerSourceCheckTimer.Elapsed += OnTimerElapsed;
         _powerSourceCheckTimer.AutoReset = true;
@@ -35,32 +40,60 @@ public class PowerSourceDetection
         UpdatePowerSourceStatus();
     }
 
-    private void OnTimerElapsed(object sender, ElapsedEventArgs e)
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _powerSourceCheckTimer.Stop();
+        _powerSourceCheckTimer.Elapsed -= OnTimerElapsed;
+        _powerSourceCheckTimer.Dispose();
+    }
+
+    private void OnTimerElapsed(object? sender, ElapsedEventArgs e)
     {
         UpdatePowerSourceStatus();
     }
 
     private void UpdatePowerSourceStatus()
     {
+        if (_disposed) return;
         var isPluggedIn = IsLaptopPluggedIn();
 
-        // Update UI on UI thread
-        Dispatcher.UIThread.InvokeAsync(() => { _powerToggleSwitch.IsChecked = isPluggedIn; });
+        Dispatcher.UIThread.Post(() =>
+        {
+            try
+            {
+                if (!_disposed && _powerToggleSwitch.IsChecked != isPluggedIn)
+                    _powerToggleSwitch.IsChecked = isPluggedIn;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating power source indicator: {ex.Message}");
+            }
+        });
     }
 
     private bool IsLaptopPluggedIn()
     {
         try
         {
-            // Try each possible path for power supply status
             foreach (var path in _possiblePowerSupplyPaths)
                 if (File.Exists(path))
-                {
-                    var status = File.ReadAllText(path).Trim();
-                    return status == "1";
-                }
+                    return File.ReadAllText(path).Trim() == "1";
 
-            // If no power supply file is found, try to check using UPower command-line tool
+            // Any supply of type "Mains"
+            const string root = "/sys/class/power_supply";
+            if (Directory.Exists(root))
+            {
+                var mains = Directory.GetDirectories(root)
+                    .Where(dir => File.Exists(Path.Combine(dir, "type")) &&
+                                  File.ReadAllText(Path.Combine(dir, "type")).Trim() == "Mains")
+                    .ToList();
+                if (mains.Count > 0)
+                    return mains.Any(dir => File.Exists(Path.Combine(dir, "online")) &&
+                                            File.ReadAllText(Path.Combine(dir, "online")).Trim() == "1");
+            }
+
             return CheckUsingUPower();
         }
         catch (Exception ex)
@@ -70,54 +103,52 @@ public class PowerSourceDetection
         }
     }
 
+    private static string RunTool(string fileName, string arguments)
+    {
+        using var process = new Process();
+        process.StartInfo.FileName = fileName;
+        process.StartInfo.Arguments = arguments;
+        process.StartInfo.UseShellExecute = false;
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.CreateNoWindow = true;
+
+        process.Start();
+        var output = process.StandardOutput.ReadToEndAsync();
+        if (!process.WaitForExit(2000))
+        {
+            try
+            {
+                process.Kill(true);
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return string.Empty;
+        }
+
+        return output.Wait(500) ? output.Result : string.Empty;
+    }
+
     private bool CheckUsingUPower()
     {
         try
         {
-            using (var process = new Process())
-            {
-                process.StartInfo.FileName = "upower";
-                process.StartInfo.Arguments = "-i /org/freedesktop/UPower/devices/line_power_AC";
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.CreateNoWindow = true;
-
-                process.Start();
-                var output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-
-                // Check if the output contains the online status
-                if (output.Contains("online:") && output.Contains("yes")) return true;
-            }
+            var output = RunTool("upower", "-i /org/freedesktop/UPower/devices/line_power_AC");
+            return output.Contains("online:") && output.Contains("yes");
         }
         catch
         {
-            // UPower command failed, try alternative method
             return CheckUsingLsAcpi();
         }
-
-        return false;
     }
 
     private bool CheckUsingLsAcpi()
     {
         try
         {
-            using (var process = new Process())
-            {
-                process.StartInfo.FileName = "acpi";
-                process.StartInfo.Arguments = "-a";
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.CreateNoWindow = true;
-
-                process.Start();
-                var output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-
-                // Check if the output indicates AC adapter is on-line
-                return output.Contains("on-line");
-            }
+            return RunTool("acpi", "-a").Contains("on-line");
         }
         catch (Exception ex)
         {

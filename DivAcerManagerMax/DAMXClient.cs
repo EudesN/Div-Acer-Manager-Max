@@ -10,36 +10,123 @@ using System.Threading.Tasks;
 
 namespace DivAcerManagerMax;
 
+/// <summary>Connection state of the client, used for the header status chip.</summary>
+public enum DaemonConnectionState
+{
+    Disconnected,
+    Connected,
+    NotRunning,
+    PermissionDenied,
+    Error
+}
+
+/// <summary>Result of a daemon command: { "success": bool, "data": ..., "error": "...", "message": "..." }.</summary>
+public sealed class DaemonResult
+{
+    public DaemonResult(bool success, string? error, JsonElement data, string? message)
+    {
+        Success = success;
+        Error = error;
+        Data = data;
+        Message = message;
+    }
+
+    public bool Success { get; }
+    public string? Error { get; }
+
+    /// <summary>Detached copy of the "data" member (ValueKind == Undefined when absent).</summary>
+    public JsonElement Data { get; }
+
+    public string? Message { get; }
+
+    public bool IsPermissionDenied =>
+        Error != null && Error.Contains("permission denied", StringComparison.OrdinalIgnoreCase);
+
+    public static DaemonResult Fail(string error)
+    {
+        return new DaemonResult(false, error, default, null);
+    }
+
+    public string? GetDataString(string property)
+    {
+        if (Data.ValueKind != JsonValueKind.Object || !Data.TryGetProperty(property, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => value.GetRawText()
+        };
+    }
+
+    public bool GetDataBool(string property)
+    {
+        return Data.ValueKind == JsonValueKind.Object &&
+               Data.TryGetProperty(property, out var value) &&
+               value.ValueKind == JsonValueKind.True;
+    }
+}
+
+/// <summary>Thrown when the socket exists but the user is not allowed to open it (EACCES).</summary>
+public sealed class DaemonPermissionException : Exception
+{
+    public const string UserMessage =
+        "Sem permissão para acessar o daemon. Adicione seu usuário ao grupo 'damx' " +
+        "(sudo usermod -aG damx $USER) e faça logout/login.";
+
+    public DaemonPermissionException(Exception? inner = null) : base(UserMessage, inner)
+    {
+    }
+}
+
+/// <summary>Thrown when a command reached the daemon but it answered success=false.</summary>
+public sealed class DaemonCommandException : Exception
+{
+    public DaemonCommandException(string message, bool permissionDenied = false) : base(message)
+    {
+        PermissionDenied = permissionDenied;
+    }
+
+    public bool PermissionDenied { get; }
+}
+
 /// <summary>
-///     Client for communicating with the DAMX-Daemon over Unix socket
+///     Client for the DAMX-Daemon Unix socket.
+///     Protocol: newline-delimited JSON. Each request is one JSON object followed by "\n";
+///     each response is one JSON object followed by "\n".
 /// </summary>
 public class DAMXClient : IDisposable
 {
     private const string SocketPath = "/var/run/DAMX.sock";
+    private const int MaxRetryAttempts = 2;
+    private const int RetryDelayMs = 300;
+    private const int MaxResponseBytes = 64 * 1024;
+    private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(3);
 
-    /// <summary>
-    ///     Send a command to the DAMX-Daemon and receive response
-    /// </summary>
-    /// <param name="command">Command name</param>
-    /// <param name="parameters">Optional parameters</param>
-    /// <returns>Response from daemon as a JsonDocument</returns>
-    private const int MaxRetryAttempts = 3;
-
-    private const int RetryDelayMs = 500;
+    // Serializes every socket operation: connect, send+receive, reset. Two callers must never
+    // interleave requests on the socket or dispose each other's socket.
     private readonly SemaphoreSlim _commandLock = new(1, 1);
-
-    // Cache of available features
-    private HashSet<string> _availableFeatures = new();
-
-    private bool _disposed;
-    private Socket _socket;
+    private readonly byte[] _rxBuffer = new byte[MaxResponseBytes];
+    private volatile HashSet<string> _availableFeatures = new();
+    private volatile bool _disposed;
+    private int _rxCount;
+    private Socket? _socket;
+    private volatile DaemonConnectionState _state = DaemonConnectionState.Disconnected;
 
     public DAMXClient()
     {
-        IsConnected = false;
     }
 
-    public bool IsConnected { get; private set; }
+    /// <summary>True while a socket is open and the last operation on it succeeded.</summary>
+    public bool IsConnected => _state == DaemonConnectionState.Connected;
+
+    public DaemonConnectionState State => _state;
+
+    /// <summary>Human readable reason of the last connection failure (null when connected).</summary>
+    public string? LastError { get; private set; }
+
+    /// <summary>Daemon version reported by "ping" (null if unknown).</summary>
+    public string? DaemonVersion { get; private set; }
 
     public void Dispose()
     {
@@ -47,80 +134,65 @@ public class DAMXClient : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    // Property to check if a feature is available
     public bool IsFeatureAvailable(string featureName)
     {
         return _availableFeatures.Contains(featureName);
     }
 
     /// <summary>
-    ///     Connect to the DAMX-Daemon Unix socket
+    ///     Make sure we have a working connection. A working socket is never torn down because of a
+    ///     single negative answer: only I/O errors reset the connection (inside SendCommandAsync).
     /// </summary>
-    /// <returns>True if connection successful, false otherwise</returns>
-    private async Task<bool> ValidateConnection()
-    {
-        if (!IsConnected) return false;
-
-        try
-        {
-            // Send a simple ping command to verify connection
-            var response = await SendCommandAsync("ping");
-            return response.RootElement.GetProperty("success").GetBoolean();
-        }
-        catch
-        {
-            IsConnected = false;
-            return false;
-        }
-    }
-
-// Modify ConnectAsync to include validation
     public async Task<bool> ConnectAsync()
     {
         try
         {
-            if (IsConnected && await ValidateConnection()) return true;
-
-            _socket?.Dispose();
-            _socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.IP);
-            var endpoint = new UnixDomainSocketEndPoint(SocketPath);
-
-            await _socket.ConnectAsync(endpoint);
-            IsConnected = true;
-
-            // Get available features upon connection
+            if (!await ValidateConnectionAsync()) return false;
             await RefreshAvailableFeaturesAsync();
-
-            return true;
+            return IsConnected;
+        }
+        catch (DaemonPermissionException ex)
+        {
+            LastError = ex.Message;
+            return false;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Console.WriteLine($"Failed to connect to daemon: {ex.Message}");
-            IsConnected = false;
             return false;
         }
     }
 
-    /// <summary>
-    ///     Refresh the available features cache from the daemon
-    /// </summary>
+    /// <summary>Sends "ping". Any well-formed answer proves the link works (old daemons answer "Unknown command").</summary>
+    private async Task<bool> ValidateConnectionAsync()
+    {
+        var result = await SendCommandResultAsync("ping");
+        if (result.Success)
+            DaemonVersion = result.GetDataString("version") ?? DaemonVersion;
+        return IsConnected;
+    }
+
     private async Task RefreshAvailableFeaturesAsync()
     {
         try
         {
-            var response = await SendCommandAsync("get_supported_features");
-            var success = response.RootElement.GetProperty("success").GetBoolean();
+            var result = await SendCommandResultAsync("get_supported_features");
+            if (!result.Success || result.Data.ValueKind != JsonValueKind.Object) return;
+            if (!result.Data.TryGetProperty("available_features", out var features) ||
+                features.ValueKind != JsonValueKind.Array) return;
 
-            if (success)
-            {
-                var data = response.RootElement.GetProperty("data");
-                var features = data.GetProperty("available_features");
+            var set = new HashSet<string>();
+            foreach (var feature in features.EnumerateArray())
+                if (feature.ValueKind == JsonValueKind.String && feature.GetString() is { } name)
+                    set.Add(name);
 
-                _availableFeatures.Clear();
-                foreach (var feature in features.EnumerateArray()) _availableFeatures.Add(feature.GetString());
-
-                Console.WriteLine($"Available features: {string.Join(", ", _availableFeatures)}");
-            }
+            _availableFeatures = set;
+            Console.WriteLine($"Available features: {string.Join(", ", set)}");
+        }
+        catch (DaemonPermissionException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -128,390 +200,241 @@ public class DAMXClient : IDisposable
         }
     }
 
-    /// <summary>
-    ///     Disconnect from the DAMX-Daemon Unix socket
-    /// </summary>
     public void Disconnect()
     {
-        if (IsConnected)
-            try
-            {
-                _socket?.Close();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error during disconnect: {ex.Message}");
-            }
-            finally
-            {
-                IsConnected = false;
-            }
+        // Take the lock so we never dispose a socket another caller is using. If an operation is
+        // stuck we still reset after a short wait (its own timeout will fire anyway).
+        var acquired = _commandLock.Wait(TimeSpan.FromSeconds(2));
+        try
+        {
+            ResetConnectionCore();
+            _state = DaemonConnectionState.Disconnected;
+        }
+        finally
+        {
+            if (acquired) _commandLock.Release();
+        }
     }
 
-    public async Task<JsonDocument> SendCommandAsync(string command, Dictionary<string, object> parameters = null)
+    private static bool IsIdempotent(string command)
     {
-        var attempt = 0;
+        return command == "ping" || command.StartsWith("get_", StringComparison.Ordinal);
+    }
 
-        while (attempt < MaxRetryAttempts)
+    /// <summary>
+    ///     Send a command and return the parsed response. The caller owns (and must dispose) the document.
+    ///     Retries only when nothing was sent yet (or for read-only get_* / ping commands).
+    /// </summary>
+    public async Task<JsonDocument> SendCommandAsync(string command, Dictionary<string, object>? parameters = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(DAMXClient));
+
+        var request = new Dictionary<string, object>
         {
-            if (!IsConnected)
-            {
-                await ConnectAsync();
+            ["command"] = command,
+            ["params"] = parameters ?? new Dictionary<string, object>()
+        };
+        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request) + "\n");
+        var idempotent = IsIdempotent(command);
 
-                if (!IsConnected)
-                    throw new InvalidOperationException("Not connected to daemon");
-            }
+        for (var attempt = 1;; attempt++)
+        {
+            var bytesSent = 0;
+            Exception failure = new IOException("Unknown daemon communication error");
 
-            await _commandLock.WaitAsync();
-
+            await _commandLock.WaitAsync(cancellationToken);
             try
             {
-                var request = new
+                if (_socket == null || _state != DaemonConnectionState.Connected)
+                    await ConnectCoreAsync(cancellationToken);
+
+                var socket = _socket!;
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(CommandTimeout);
+
+                while (bytesSent < payload.Length)
                 {
-                    command,
-                    @params = parameters ?? new Dictionary<string, object>()
-                };
-
-                var requestJson = JsonSerializer.Serialize(request);
-                var requestBytes = Encoding.UTF8.GetBytes(requestJson);
-
-                await _socket.SendAsync(requestBytes, SocketFlags.None);
-
-                var buffer = new byte[4096];
-                var received = await _socket.ReceiveAsync(buffer, SocketFlags.None);
-
-                if (received <= 0)
-                {
-                    ResetConnection();
-                    attempt++;
-                    await Task.Delay(RetryDelayMs);
-                    continue;
+                    var n = await socket.SendAsync(payload.AsMemory(bytesSent), SocketFlags.None, timeout.Token);
+                    if (n <= 0) throw new IOException("Daemon socket refused data");
+                    bytesSent += n;
                 }
 
-                var responseJson = Encoding.UTF8.GetString(buffer, 0, received);
-                return JsonDocument.Parse(responseJson);
+                var line = await ReadLineAsync(socket, timeout.Token);
+                return JsonDocument.Parse(line);
             }
-            catch (SocketException ex) when (
-                ex.SocketErrorCode == SocketError.ConnectionReset ||
-                ex.SocketErrorCode == SocketError.Shutdown ||
-                ex.SocketErrorCode == SocketError.ConnectionAborted)
+            catch (DaemonPermissionException)
             {
-                ResetConnection();
-                attempt++;
-                await Task.Delay(RetryDelayMs);
-            }
-            catch (JsonException ex)
-            {
-                Console.WriteLine($"Invalid JSON response from daemon: {ex.Message}");
-
-                ResetConnection();
-                attempt++;
-                await Task.Delay(RetryDelayMs);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error communicating with daemon: {ex.Message}");
-                ResetConnection();
                 throw;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                ResetConnectionCore();
+                _state = DaemonConnectionState.Error;
+                failure = new TimeoutException($"Daemon did not answer '{command}' within {CommandTimeout.TotalSeconds:0} s");
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or ObjectDisposedException
+                                           or JsonException or InvalidOperationException)
+            {
+                ResetConnectionCore();
+                if (_state == DaemonConnectionState.Connected) _state = DaemonConnectionState.Error;
+                failure = ex;
             }
             finally
             {
                 _commandLock.Release();
             }
-        }
 
-        throw new IOException($"Failed to communicate with daemon after {MaxRetryAttempts} attempts");
+            // Never resend a state-changing command that may already have reached the daemon.
+            var mayRetry = bytesSent == 0 || idempotent;
+            if (!mayRetry || attempt >= MaxRetryAttempts)
+            {
+                LastError = failure.Message;
+                if (failure is TimeoutException or IOException) throw failure;
+                throw new IOException($"Failed to communicate with daemon: {failure.Message}", failure);
+            }
+
+            await Task.Delay(RetryDelayMs, cancellationToken);
+        }
     }
 
-
-    /// <summary>
-    ///     Get all settings from the DAMX-Daemon
-    /// </summary>
-    /// <returns>All settings as a JsonDocument</returns>
-    public async Task<DAMXSettings> GetAllSettingsAsync()
+    /// <summary>Send a command and return a detached result (no JsonDocument to dispose).</summary>
+    public async Task<DaemonResult> SendCommandResultAsync(string command,
+        Dictionary<string, object>? parameters = null, CancellationToken cancellationToken = default)
     {
-        var response = await SendCommandAsync("get_all_settings");
-        var success = response.RootElement.GetProperty("success").GetBoolean();
-
-        if (success)
-        {
-            var data = response.RootElement.GetProperty("data");
-            var settings = JsonSerializer.Deserialize<DAMXSettings>(data.GetRawText());
-
-            // Update available features cache
-            if (settings.AvailableFeatures != null)
-                _availableFeatures = new HashSet<string>(settings.AvailableFeatures);
-
-            return settings;
-        }
-
-        var error = response.RootElement.GetProperty("error").GetString();
-        throw new Exception($"Failed to get settings: {error}");
+        using var doc = await SendCommandAsync(command, parameters, cancellationToken);
+        return ToResult(doc);
     }
 
-    /// <summary>
-    ///     Set thermal profile
-    /// </summary>
-    /// <param name="profile">Profile name</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetThermalProfileAsync(string profile)
+    private static DaemonResult ToResult(JsonDocument doc)
     {
-        if (!IsFeatureAvailable("thermal_profile"))
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            return DaemonResult.Fail("Malformed daemon response");
+
+        var success = root.TryGetProperty("success", out var s) && s.ValueKind == JsonValueKind.True;
+        string? error = null;
+        if (root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String)
+            error = e.GetString();
+        string? message = null;
+        if (root.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String)
+            message = m.GetString();
+        var data = root.TryGetProperty("data", out var d) ? d.Clone() : default;
+
+        if (!success && string.IsNullOrWhiteSpace(error))
+            error = "Daemon reported failure";
+
+        return new DaemonResult(success, error, data, message);
+    }
+
+    /// <summary>Reads one "\n"-terminated response. Must be called with the lock held.</summary>
+    private async Task<string> ReadLineAsync(Socket socket, CancellationToken token)
+    {
+        while (true)
         {
-            Console.WriteLine("Thermal profile feature is not available on this device");
+            var newline = Array.IndexOf(_rxBuffer, (byte)'\n', 0, _rxCount);
+            if (newline >= 0)
+            {
+                var line = Encoding.UTF8.GetString(_rxBuffer, 0, newline).Trim();
+                var rest = _rxCount - (newline + 1);
+                if (rest > 0) Buffer.BlockCopy(_rxBuffer, newline + 1, _rxBuffer, 0, rest);
+                _rxCount = rest;
+                if (line.Length == 0) continue; // tolerate blank keep-alive lines
+                return line;
+            }
+
+            // Compatibility with daemons that do not terminate responses with "\n":
+            // accept the buffer once it holds one complete JSON value.
+            if (_rxCount > 0 && IsCompleteJson(_rxBuffer, _rxCount))
+            {
+                var line = Encoding.UTF8.GetString(_rxBuffer, 0, _rxCount).Trim();
+                _rxCount = 0;
+                return line;
+            }
+
+            if (_rxCount >= MaxResponseBytes)
+                throw new IOException($"Daemon response exceeds {MaxResponseBytes / 1024} KiB");
+
+            var received = await socket.ReceiveAsync(_rxBuffer.AsMemory(_rxCount, MaxResponseBytes - _rxCount),
+                SocketFlags.None, token);
+            if (received <= 0) throw new IOException("Daemon closed the connection");
+            _rxCount += received;
+        }
+    }
+
+    private static bool IsCompleteJson(byte[] buffer, int count)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(new ReadOnlySpan<byte>(buffer, 0, count), true, default);
+            return reader.Read() && reader.TrySkip() && !reader.Read();
+        }
+        catch (JsonException)
+        {
             return false;
         }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "profile", profile }
-        };
-
-        var response = await SendCommandAsync("set_thermal_profile", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
     }
 
-    /// <summary>
-    ///     Set fan speeds
-    /// </summary>
-    /// <param name="cpu">CPU fan speed (0-100)</param>
-    /// <param name="gpu">GPU fan speed (0-100)</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetFanSpeedAsync(int cpu, int gpu)
+    /// <summary>Opens a new socket. Must be called with the lock held.</summary>
+    private async Task ConnectCoreAsync(CancellationToken cancellationToken)
     {
-        if (!IsFeatureAvailable("fan_speed"))
+        ResetConnectionCore();
+
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        try
         {
-            Console.WriteLine("Fan speed control is not available on this device");
-            return false;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(ConnectTimeout);
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(SocketPath), timeout.Token);
+
+            _socket = socket;
+            _rxCount = 0;
+            _state = DaemonConnectionState.Connected;
+            LastError = null;
         }
-
-        var parameters = new Dictionary<string, object>
+        catch (Exception ex) when (IsAccessDenied(ex))
         {
-            { "cpu", cpu },
-            { "gpu", gpu }
-        };
-
-        var response = await SendCommandAsync("set_fan_speed", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    /// <summary>
-    ///     Set backlight timeout
-    /// </summary>
-    /// <param name="enabled">Enable or disable timeout</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetBacklightTimeoutAsync(bool enabled)
-    {
-        if (!IsFeatureAvailable("backlight_timeout"))
-        {
-            Console.WriteLine("Backlight timeout feature is not available on this device");
-            return false;
+            socket.Dispose();
+            _state = DaemonConnectionState.PermissionDenied;
+            LastError = DaemonPermissionException.UserMessage;
+            throw new DaemonPermissionException(ex);
         }
-
-        var parameters = new Dictionary<string, object>
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or IOException)
         {
-            { "enabled", enabled }
-        };
-
-        var response = await SendCommandAsync("set_backlight_timeout", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    /// <summary>
-    ///     Set battery calibration
-    /// </summary>
-    /// <param name="enabled">Start or stop calibration</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetBatteryCalibrationAsync(bool enabled)
-    {
-        if (!IsFeatureAvailable("battery_calibration"))
-        {
-            Console.WriteLine("Battery calibration feature is not available on this device");
-            return false;
+            socket.Dispose();
+            _state = DaemonConnectionState.NotRunning;
+            LastError = File.Exists(SocketPath)
+                ? $"Daemon not reachable at {SocketPath}: {ex.Message}"
+                : $"{SocketPath} not found — is damx-daemon.service running?";
+            throw new IOException(LastError, ex);
         }
-
-        var parameters = new Dictionary<string, object>
+        catch
         {
-            { "enabled", enabled }
-        };
-
-        var response = await SendCommandAsync("set_battery_calibration", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    /// <summary>
-    ///     Set battery limiter
-    /// </summary>
-    /// <param name="enabled">Enable or disable battery limit</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetBatteryLimiterAsync(bool enabled)
-    {
-        if (!IsFeatureAvailable("battery_limiter"))
-        {
-            Console.WriteLine("Battery limiter feature is not available on this device");
-            return false;
+            socket.Dispose();
+            _state = DaemonConnectionState.Error;
+            throw;
         }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "enabled", enabled }
-        };
-
-        var response = await SendCommandAsync("set_battery_limiter", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
     }
 
-    /// <summary>
-    ///     Set boot animation sound
-    /// </summary>
-    /// <param name="enabled">Enable or disable boot sound</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetBootAnimationSoundAsync(bool enabled)
+    private static bool IsAccessDenied(Exception ex)
     {
-        if (!IsFeatureAvailable("boot_animation_sound"))
-        {
-            Console.WriteLine("Boot animation sound feature is not available on this device");
-            return false;
-        }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "enabled", enabled }
-        };
-
-        var response = await SendCommandAsync("set_boot_animation_sound", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
+        return ex is UnauthorizedAccessException ||
+               (ex is SocketException se &&
+                (se.SocketErrorCode == SocketError.AccessDenied || se.NativeErrorCode == 13));
     }
 
-    /// <summary>
-    ///     Set LCD override
-    /// </summary>
-    /// <param name="enabled">Enable or disable LCD override</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetLcdOverrideAsync(bool enabled)
+    /// <summary>Closes the current socket. Must be called with the lock held (or from Dispose).</summary>
+    private void ResetConnectionCore()
     {
-        if (!IsFeatureAvailable("lcd_override"))
-        {
-            Console.WriteLine("LCD override feature is not available on this device");
-            return false;
-        }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "enabled", enabled }
-        };
-
-        var response = await SendCommandAsync("set_lcd_override", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    /// <summary>
-    ///     Set USB charging level
-    /// </summary>
-    /// <param name="level">USB charging level (0, 10, 20, or 30)</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetUsbChargingAsync(int level)
-    {
-        if (!IsFeatureAvailable("usb_charging"))
-        {
-            Console.WriteLine("USB charging control is not available on this device");
-            return false;
-        }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "level", level }
-        };
-
-        var response = await SendCommandAsync("set_usb_charging", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    /// <summary>
-    ///     Set keyboard per-zone mode colors
-    /// </summary>
-    /// <param name="zone1">Zone 1 color (hex RGB)</param>
-    /// <param name="zone2">Zone 2 color (hex RGB)</param>
-    /// <param name="zone3">Zone 3 color (hex RGB)</param>
-    /// <param name="zone4">Zone 4 color (hex RGB)</param>
-    /// <param name="brightness">Brightness (0-100)</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetPerZoneModeAsync(string zone1, string zone2, string zone3, string zone4, int brightness)
-    {
-        if (!IsFeatureAvailable("per_zone_mode"))
-        {
-            Console.WriteLine("Per-zone keyboard mode is not available on this device");
-            return false;
-        }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "zone1", zone1 },
-            { "zone2", zone2 },
-            { "zone3", zone3 },
-            { "zone4", zone4 },
-            { "brightness", brightness }
-        };
-
-        var response = await SendCommandAsync("set_per_zone_mode", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    /// <summary>
-    ///     Set keyboard lighting effect
-    /// </summary>
-    /// <param name="mode">Effect mode (0-7)</param>
-    /// <param name="speed">Effect speed (0-9)</param>
-    /// <param name="brightness">Brightness (0-100)</param>
-    /// <param name="direction">Direction (1=right to left, 2=left to right)</param>
-    /// <param name="red">Red component (0-255)</param>
-    /// <param name="green">Green component (0-255)</param>
-    /// <param name="blue">Blue component (0-255)</param>
-    /// <returns>True if successful</returns>
-    public async Task<bool> SetFourZoneModeAsync(int mode, int speed, int brightness, int direction, int red, int green,
-        int blue)
-    {
-        if (!IsFeatureAvailable("four_zone_mode"))
-        {
-            Console.WriteLine("Four-zone keyboard mode is not available on this device");
-            return false;
-        }
-
-        var parameters = new Dictionary<string, object>
-        {
-            { "mode", mode },
-            { "speed", speed },
-            { "brightness", brightness },
-            { "direction", direction },
-            { "red", red },
-            { "green", green },
-            { "blue", blue }
-        };
-
-        var response = await SendCommandAsync("set_four_zone_mode", parameters);
-        return response.RootElement.GetProperty("success").GetBoolean();
-    }
-
-    protected virtual void Dispose(bool disposing)
-    {
-        if (_disposed) return;
-
-        if (disposing)
-        {
-            Disconnect();
-            _socket?.Dispose();
-        }
-
-        _disposed = true;
-    }
-
-    private void ResetConnection()
-    {
-        IsConnected = false;
+        var socket = _socket;
+        _socket = null;
+        _rxCount = 0;
+        if (_state == DaemonConnectionState.Connected) _state = DaemonConnectionState.Disconnected;
+        if (socket == null) return;
 
         try
         {
-            _socket?.Shutdown(SocketShutdown.Both);
+            socket.Shutdown(SocketShutdown.Both);
         }
         catch
         {
@@ -520,12 +443,169 @@ public class DAMXClient : IDisposable
 
         try
         {
-            _socket?.Dispose();
+            socket.Dispose();
         }
         catch
         {
             // Ignore cleanup failure.
         }
+    }
+
+    // ------------------------------------------------------------------ typed commands
+
+    private static DaemonResult NotAvailable(string feature)
+    {
+        return DaemonResult.Fail($"Feature '{feature}' is not available on this device");
+    }
+
+    public async Task<DAMXSettings> GetAllSettingsAsync()
+    {
+        var result = await SendCommandResultAsync("get_all_settings");
+        if (!result.Success)
+            throw new DaemonCommandException($"Failed to get settings: {result.Error}", result.IsPermissionDenied);
+
+        var settings = result.Data.ValueKind == JsonValueKind.Object
+            ? result.Data.Deserialize<DAMXSettings>() ?? new DAMXSettings()
+            : new DAMXSettings();
+
+        if (settings.AvailableFeatures != null)
+            _availableFeatures = new HashSet<string>(settings.AvailableFeatures);
+
+        return settings;
+    }
+
+    public async Task<string?> GetModprobeParameterAsync()
+    {
+        var result = await SendCommandResultAsync("get_modprobe_parameter");
+        if (!result.Success)
+            throw new DaemonCommandException(result.Error ?? "get_modprobe_parameter failed",
+                result.IsPermissionDenied);
+        return result.GetDataString("parameter") ?? "";
+    }
+
+    public Task<DaemonResult> SetThermalProfileAsync(string profile)
+    {
+        if (!IsFeatureAvailable("thermal_profile")) return Task.FromResult(NotAvailable("thermal_profile"));
+        return SendCommandResultAsync("set_thermal_profile", new Dictionary<string, object> { { "profile", profile } });
+    }
+
+    public Task<DaemonResult> SetFanSpeedAsync(int cpu, int gpu)
+    {
+        if (!IsFeatureAvailable("fan_speed")) return Task.FromResult(NotAvailable("fan_speed"));
+        return SendCommandResultAsync("set_fan_speed",
+            new Dictionary<string, object> { { "cpu", cpu }, { "gpu", gpu } });
+    }
+
+    public Task<DaemonResult> SetBacklightTimeoutAsync(bool enabled)
+    {
+        if (!IsFeatureAvailable("backlight_timeout")) return Task.FromResult(NotAvailable("backlight_timeout"));
+        return SendCommandResultAsync("set_backlight_timeout",
+            new Dictionary<string, object> { { "enabled", enabled } });
+    }
+
+    public Task<DaemonResult> SetBatteryCalibrationAsync(bool enabled)
+    {
+        if (!IsFeatureAvailable("battery_calibration")) return Task.FromResult(NotAvailable("battery_calibration"));
+        return SendCommandResultAsync("set_battery_calibration",
+            new Dictionary<string, object> { { "enabled", enabled } });
+    }
+
+    public Task<DaemonResult> SetBatteryLimiterAsync(bool enabled)
+    {
+        if (!IsFeatureAvailable("battery_limiter")) return Task.FromResult(NotAvailable("battery_limiter"));
+        return SendCommandResultAsync("set_battery_limiter",
+            new Dictionary<string, object> { { "enabled", enabled } });
+    }
+
+    public Task<DaemonResult> SetBootAnimationSoundAsync(bool enabled)
+    {
+        if (!IsFeatureAvailable("boot_animation_sound"))
+            return Task.FromResult(NotAvailable("boot_animation_sound"));
+        return SendCommandResultAsync("set_boot_animation_sound",
+            new Dictionary<string, object> { { "enabled", enabled } });
+    }
+
+    public Task<DaemonResult> SetLcdOverrideAsync(bool enabled)
+    {
+        if (!IsFeatureAvailable("lcd_override")) return Task.FromResult(NotAvailable("lcd_override"));
+        return SendCommandResultAsync("set_lcd_override", new Dictionary<string, object> { { "enabled", enabled } });
+    }
+
+    public Task<DaemonResult> SetUsbChargingAsync(int level)
+    {
+        if (!IsFeatureAvailable("usb_charging")) return Task.FromResult(NotAvailable("usb_charging"));
+        return SendCommandResultAsync("set_usb_charging", new Dictionary<string, object> { { "level", level } });
+    }
+
+    public Task<DaemonResult> SetPerZoneModeAsync(string zone1, string zone2, string zone3, string zone4,
+        int brightness)
+    {
+        if (!IsFeatureAvailable("per_zone_mode")) return Task.FromResult(NotAvailable("per_zone_mode"));
+        return SendCommandResultAsync("set_per_zone_mode", new Dictionary<string, object>
+        {
+            { "zone1", zone1 },
+            { "zone2", zone2 },
+            { "zone3", zone3 },
+            { "zone4", zone4 },
+            { "brightness", brightness }
+        });
+    }
+
+    public Task<DaemonResult> SetFourZoneModeAsync(int mode, int speed, int brightness, int direction, int red,
+        int green, int blue)
+    {
+        if (!IsFeatureAvailable("four_zone_mode")) return Task.FromResult(NotAvailable("four_zone_mode"));
+        return SendCommandResultAsync("set_four_zone_mode", new Dictionary<string, object>
+        {
+            { "mode", mode },
+            { "speed", speed },
+            { "brightness", brightness },
+            { "direction", direction },
+            { "red", red },
+            { "green", green },
+            { "blue", blue }
+        });
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (disposing)
+            Disconnect();
+    }
+}
+
+/// <summary>Reads a JSON string, number, bool or null into a string (daemon versions differ).</summary>
+public sealed class FlexibleStringConverter : JsonConverter<string>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.String:
+                return reader.GetString();
+            case JsonTokenType.Number:
+                using (var doc = JsonDocument.ParseValue(ref reader))
+                {
+                    return doc.RootElement.GetRawText();
+                }
+            case JsonTokenType.True:
+                return "1";
+            case JsonTokenType.False:
+                return "0";
+            case JsonTokenType.Null:
+                return null;
+            default:
+                reader.Skip();
+                return null;
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value);
     }
 }
 
@@ -534,54 +614,80 @@ public class DAMXClient : IDisposable
 /// </summary>
 public class DAMXSettings
 {
-    [JsonPropertyName("laptop_type")] public string LaptopType { get; set; } = "UNKNOWN";
+    [JsonPropertyName("laptop_type")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string LaptopType { get; set; } = "UNKNOWN";
 
     [JsonPropertyName("has_four_zone_kb")] public bool HasFourZoneKb { get; set; }
 
     [JsonPropertyName("available_features")]
     public List<string> AvailableFeatures { get; set; } = new();
 
-    [JsonPropertyName("version")] public string Version { get; set; } = "NOT CONNECTED PROPERLY";
-    [JsonPropertyName("driver_version")] public string DriverVersion { get; set; } = "DRIVER VERSION NOT FOUND";
+    [JsonPropertyName("version")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string Version { get; set; } = "NOT CONNECTED PROPERLY";
 
+    [JsonPropertyName("driver_version")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string DriverVersion { get; set; } = "DRIVER VERSION NOT FOUND";
 
     [JsonPropertyName("thermal_profile")] public ThermalProfileSettings ThermalProfile { get; set; } = new();
 
     [JsonPropertyName("backlight_timeout")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string BacklightTimeout { get; set; } = "0";
 
     [JsonPropertyName("battery_calibration")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string BatteryCalibration { get; set; } = "0";
 
-    [JsonPropertyName("battery_limiter")] public string BatteryLimiter { get; set; } = "0";
+    [JsonPropertyName("battery_limiter")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string BatteryLimiter { get; set; } = "0";
 
     [JsonPropertyName("boot_animation_sound")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string BootAnimationSound { get; set; } = "0";
 
     [JsonPropertyName("fan_speed")] public FanSpeedSettings FanSpeed { get; set; } = new();
 
-    [JsonPropertyName("lcd_override")] public string LcdOverride { get; set; } = "0";
+    [JsonPropertyName("lcd_override")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string LcdOverride { get; set; } = "0";
 
-    [JsonPropertyName("usb_charging")] public string UsbCharging { get; set; } = "0";
+    [JsonPropertyName("usb_charging")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string UsbCharging { get; set; } = "0";
 
-    [JsonPropertyName("per_zone_mode")] public string PerZoneMode { get; set; } = "";
+    [JsonPropertyName("per_zone_mode")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string PerZoneMode { get; set; } = "";
 
-    [JsonPropertyName("four_zone_mode")] public string FourZoneMode { get; set; } = "";
+    [JsonPropertyName("four_zone_mode")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string FourZoneMode { get; set; } = "";
 
     [JsonPropertyName("modprobe_parameter")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
     public string ModprobeParameter { get; set; } = "";
 }
 
 public class ThermalProfileSettings
 {
-    [JsonPropertyName("current")] public string Current { get; set; } = "balanced";
+    [JsonPropertyName("current")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string Current { get; set; } = "";
 
     [JsonPropertyName("available")] public List<string> Available { get; set; } = new();
 }
 
 public class FanSpeedSettings
 {
-    [JsonPropertyName("cpu")] public string Cpu { get; set; } = "0";
+    [JsonPropertyName("cpu")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string Cpu { get; set; } = "0";
 
-    [JsonPropertyName("gpu")] public string Gpu { get; set; } = "0";
+    [JsonPropertyName("gpu")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string Gpu { get; set; } = "0";
 }

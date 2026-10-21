@@ -5,131 +5,134 @@
         xmlns:views="clr-namespace:DivAcerManagerMax"
         xmlns:local="using:DivAcerManagerMax"
         xmlns:material="using:Material.Icons.Avalonia"
-        mc:Ignorable="d" d:DesignWidth="1200" d:DesignHeight="760"
+        mc:Ignorable="d" d:DesignWidth="1280" d:DesignHeight="720"
 
         x:Class="DivAcerManagerMax.MainWindow"
-        Title="DAMX"
+        Title="DAMX // Acer Control"
         Icon="iconTransparent.png"
         WindowStartupLocation="CenterScreen"
         SystemDecorations="Full"
-        Background="{StaticResource AppBackgroundBrush}"
+        Background="{StaticResource BgBrush}"
 
-        Width="1200" Height="760"
-        MinWidth="1100" MinHeight="560">
+        Width="1280" Height="720"
+        MinWidth="1100" MinHeight="600">
 
     <Window.Styles>
-        <!-- The tab strip sits on top of the sidebar panel drawn behind the TabControl. -->
+        <!-- The nav strip sits on top of the sidebar panel drawn behind the TabControl. -->
         <Style Selector="TabControl.Sidebar /template/ ItemsPresenter#PART_ItemsPresenter">
-            <Setter Property="Width" Value="216" />
-            <Setter Property="Margin" Value="16 146 16 12" />
+            <Setter Property="Width" Value="192" />
+            <Setter Property="Margin" Value="8 44 8 12" />
         </Style>
 
         <!-- Page content area to the right of the sidebar -->
         <Style Selector="TabControl.Sidebar ScrollViewer.Page > StackPanel">
-            <Setter Property="Margin" Value="36 30 36 24" />
-            <Setter Property="MaxWidth" Value="1040" />
+            <Setter Property="Margin" Value="24 20 24 24" />
+            <Setter Property="MaxWidth" Value="1180" />
         </Style>
 
-        <Style Selector="local|HudPanel.Tile TextBlock">
-            <Setter Property="Margin" Value="0 0 0 10" />
+        <Style Selector="local|HudPanel.Tile TextBlock.TileTitle">
+            <Setter Property="Margin" Value="0 0 0 8" />
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
             <Setter Property="FontSize" Value="11" />
             <Setter Property="LetterSpacing" Value="1" />
-            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource InkSecondaryBrush}" />
         </Style>
 
         <!-- "KEY ........ VALUE" rows -->
-        <Style Selector="Grid.KeyValue">
-            <Setter Property="Margin" Value="0 5" />
-        </Style>
-        <Style Selector="Grid.KeyValue TextBlock">
-            <Setter Property="Margin" Value="0" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-        </Style>
-        <Style Selector="Grid.KeyValue TextBlock.Key">
-            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
-            <Setter Property="FontSize" Value="12" />
-            <Setter Property="LetterSpacing" Value="1" />
-        </Style>
         <Style Selector="Grid.KeyValue TextBlock.Value">
-            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
-            <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="TextAlignment" Value="Right" />
-        </Style>
-
-        <!-- Small boxed readout showing a slider's value -->
-        <Style Selector="local|HudPanel.Readout">
-            <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource AccentDimBrush}" />
-            <Setter Property="Cut" Value="5" />
-            <Setter Property="CutBottomLeft" Value="False" />
-            <Setter Property="Padding" Value="8 3" />
-            <Setter Property="MinWidth" Value="60" />
-            <Setter Property="Margin" Value="14 0 0 0" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-        </Style>
-        <Style Selector="local|HudPanel.Readout TextBlock">
-            <Setter Property="Margin" Value="0" />
-            <Setter Property="FontWeight" Value="Bold" />
-            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
-            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
         </Style>
 
         <Style Selector="TextBlock.FieldLabel">
-            <Setter Property="Margin" Value="0" />
-            <Setter Property="Width" Value="104" />
-            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
+            <Setter Property="FontSize" Value="11" />
             <Setter Property="LetterSpacing" Value="1" />
+            <Setter Property="Width" Value="96" />
             <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
         </Style>
 
-        <Style Selector="TextBlock.Hint">
-            <Setter Property="FontSize" Value="12" />
-            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+        <!-- Header brand -->
+        <Style Selector="StackPanel.Brand > TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="LetterSpacing" Value="2" />
+            <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
+
+        <!-- Non-blocking status toast -->
+        <Style Selector="local|HudPanel.Toast">
+            <Setter Property="Background" Value="{StaticResource SurfaceRaisedBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LineStrongBrush}" />
+            <Setter Property="Cut" Value="8" />
+            <Setter Property="CutTopLeft" Value="False" />
+            <Setter Property="CutBottomLeft" Value="False" />
+            <Setter Property="Padding" Value="14 10" />
+        </Style>
+        <Style Selector="local|HudPanel.Toast.Error">
+            <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+        </Style>
+
     </Window.Styles>
 
-    <Grid>
+    <Grid RowDefinitions="56,*">
 
-        <Grid ColumnDefinitions="248,*">
+        <!-- ============================================================ Header bar -->
+        <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 0 1">
+            <Panel>
+                <!-- very faint scanline texture, header only -->
+                <local:Scanlines Fill="{StaticResource ScanlineBrush}" Pitch="3" />
+
+                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="20 0">
+                    <Image Source="iconTransparent.png" Width="22" Height="22" VerticalAlignment="Center"
+                           Margin="0 0 12 0" />
+                    <StackPanel Grid.Column="1" Classes="Brand" Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="DAMX" Foreground="{StaticResource InkBrush}" />
+                        <TextBlock Text="//" Foreground="{StaticResource AccentBrush}" />
+                        <TextBlock Text="ACER CONTROL" Foreground="{StaticResource InkSecondaryBrush}" />
+                    </StackPanel>
+                    <local:Stripes Grid.Column="2" Width="64" Height="8" Margin="20 0 0 0"
+                                   HorizontalAlignment="Left" VerticalAlignment="Center"
+                                   StripeWidth="2" Gap="4" />
+
+                    <TextBlock x:Name="HeaderModelText" Grid.Column="3" Text="—" Classes="Mono"
+                               FontSize="12" LetterSpacing="1" Foreground="{StaticResource InkSecondaryBrush}"
+                               VerticalAlignment="Center" Margin="0 0 16 0" MaxWidth="360"
+                               TextTrimming="CharacterEllipsis" />
+
+                    <Border x:Name="DaemonStatusChip" Grid.Column="4" Classes="Chip"
+                            Background="Transparent" Cursor="Hand"
+                            Tapped="DaemonStatusChip_OnTapped"
+                            ToolTip.Tip="Daemon connection (/var/run/DAMX.sock). Click to reconnect.">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Ellipse x:Name="DaemonStatusDot" Classes="StatusDot" />
+                            <TextBlock x:Name="DaemonStatusText" Text="CONNECTING" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Panel>
+        </Border>
+
+        <!-- ============================================================ Body -->
+        <Grid Grid.Row="1" ColumnDefinitions="208,*">
 
             <!-- Sidebar panel (the navigation items are the TabControl's strip, laid over it) -->
-            <Border Grid.Column="0" Background="{StaticResource SidebarBrush}"
-                    BorderBrush="{StaticResource StrokeBrush}" BorderThickness="0 0 1 0">
+            <Border Grid.Column="0" Background="{StaticResource BgBrush}"
+                    BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 1 0">
                 <Grid RowDefinitions="Auto,*,Auto">
-                    <StackPanel Margin="20 24 20 0">
-                        <Grid ColumnDefinitions="Auto,*">
-                            <local:HudPanel Width="46" Height="46" Cut="9" CutTopLeft="False"
-                                            Background="{StaticResource AccentSoftBrush}"
-                                            BorderBrush="{StaticResource AccentDimBrush}">
-                                <Image Source="iconTransparent.png" Margin="6" />
-                            </local:HudPanel>
-                            <StackPanel Grid.Column="1" Margin="12 0 0 0" VerticalAlignment="Center">
-                                <TextBlock Text="DAMX" FontFamily="{StaticResource DisplayFont}" FontWeight="Bold"
-                                           FontSize="28" LetterSpacing="6" Margin="0"
-                                           Foreground="{StaticResource AccentBrush}">
-                                    <TextBlock.Effect>
-                                        <DropShadowEffect OffsetX="0" OffsetY="0" BlurRadius="14"
-                                                          Color="#9EF0C5" Opacity="0.55" />
-                                    </TextBlock.Effect>
-                                </TextBlock>
-                                <TextBlock Text="DIV.ACER.MANAGER.MAX" Classes="Tag" />
-                            </StackPanel>
-                        </Grid>
-                        <local:Stripes Height="6" Margin="0 18 0 0" StripeWidth="3" Gap="3" />
-                        <TextBlock Text="// NAVIGATION" Classes="Tag" Margin="2 18 0 0" />
-                    </StackPanel>
+                    <TextBlock Text="NAVIGATION" Classes="Tag" Margin="24 20 20 0" />
 
-                    <StackPanel Grid.Row="2" Margin="20 0 20 20">
-                        <Border Classes="Rule" Margin="0 0 0 10" />
-                        <TextBlock Text="&gt; ACER_WMI // CONTROL" Classes="Tag" Margin="0 0 0 4" />
-                        <TextBlock Text="&gt; NITRO // PREDATOR" Classes="Tag" />
-                        <local:Stripes Height="4" Margin="0 12 0 0" StripeWidth="2" Gap="4" />
+                    <StackPanel Grid.Row="2" Margin="24 0 20 16" Spacing="4">
+                        <Border Classes="Rule" Margin="0 0 0 8" />
+                        <TextBlock Text="ACER_WMI // LINUWU_SENSE" Classes="Tag" />
+                        <TextBlock Text="NITRO // PREDATOR" Classes="Tag" />
                     </StackPanel>
                 </Grid>
             </Border>
 
-            <!-- Main Content -->
             <TabControl Grid.Column="0" Grid.ColumnSpan="2" Classes="Sidebar" TabStripPlacement="Left"
                         Background="Transparent" BorderThickness="0" Padding="0">
                 <TabControl.ItemsPanel>
@@ -138,6 +141,7 @@
                     </ItemsPanelTemplate>
                 </TabControl.ItemsPanel>
 
+                <!-- ==================================================== 01 Dashboard -->
                 <TabItem>
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
@@ -146,304 +150,92 @@
                         </StackPanel>
                     </TabItem.Header>
 
-                    <views:Dashboard />
-
+                    <!-- Telemetry + thermal profile + fan control live in Dashboard.axaml -->
+                    <views:Dashboard x:Name="DashboardView" />
                 </TabItem>
 
-                <!-- Power & Performance Tab -->
-                <TabItem>
-                    <TabItem.Header>
-                        <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="02" Classes="NavIndex" />
-                            <TextBlock Text="POWER &amp; PERF" />
-                        </StackPanel>
-                    </TabItem.Header>
-                    <ScrollViewer Classes="Page">
-                        <StackPanel>
-                            <Grid Classes="PageHeader" ColumnDefinitions="*,Auto">
-                                <StackPanel>
-                                    <TextBlock Text="POWER // PERFORMANCE" Classes="SectionHeader" />
-                                    <TextBlock Text="&gt; THERMAL PROFILES AND FAN BEHAVIOUR" Classes="Caption" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Bottom" Spacing="6">
-                                    <TextBlock Text="SEC_02 // PWR" Classes="Tag" HorizontalAlignment="Right" />
-                                    <local:Stripes Width="140" Height="10" />
-                                </StackPanel>
-                            </Grid>
-
-                            <Border Classes="Card" x:Name="ThermalProfilePanel">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="Speedometer" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="PERFORMANCE PROFILES" Classes="SubHeader" />
-                                                <TextBlock Classes="Caption"
-                                                           Text="// configure thermal profiles to balance performance and temperature" />
-                                            </StackPanel>
-                                            <ToggleSwitch x:Name="PluggedInToggleSwitch" Grid.Column="2"
-                                                          VerticalAlignment="Center" IsChecked="True"
-                                                          IsHitTestVisible="False">
-                                                <ToggleSwitch.OffContent>
-                                                    <material:MaterialIcon Kind="BatteryOutline" Width="20" Height="20" />
-                                                </ToggleSwitch.OffContent>
-                                                <ToggleSwitch.OnContent>
-                                                    <material:MaterialIcon Kind="PowerPlugOutline" Width="20" Height="20" />
-                                                </ToggleSwitch.OnContent>
-                                            </ToggleSwitch>
-                                        </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                                            <RadioButton x:Name="LowPowerProfileButton" GroupName="ProfileGroup"
-                                                         IsVisible="{Binding ElementName=PluggedInToggleSwitch, Path=!IsChecked}">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="Leaf" />
-                                                    <TextBlock Text="ECO" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-
-                                            <RadioButton x:Name="QuietProfileButton" GroupName="ProfileGroup"
-                                                         IsVisible="{Binding ElementName=PluggedInToggleSwitch, Path=IsChecked}">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="FanMinus" />
-                                                    <TextBlock Text="QUIET" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-
-                                            <RadioButton x:Name="BalancedProfileButton" GroupName="ProfileGroup"
-                                                         IsChecked="True">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="ScaleBalance" />
-                                                    <TextBlock Text="BALANCED" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-
-                                            <RadioButton x:Name="PerformanceProfileButton" GroupName="ProfileGroup"
-                                                         IsVisible="{Binding ElementName=PluggedInToggleSwitch, Path=IsChecked}">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="SpeedometerMedium" />
-                                                    <TextBlock Text="PERFORMANCE" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-
-                                            <RadioButton x:Name="TurboProfileButton" GroupName="ProfileGroup"
-                                                         IsVisible="{Binding ElementName=PluggedInToggleSwitch, Path=IsChecked}">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="RocketLaunch" />
-                                                    <TextBlock Text="TURBO" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-                                        </StackPanel>
-
-                                        <TextBlock x:Name="ThermalProfileInfoText" Classes="Hint"
-                                                   Margin="0 18 0 0"
-                                                   Text="Performance profiles are preset modes that control your device's speed, power use, and cooling:"
-                                                   HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" />
-                                    </StackPanel>
-                                </local:HudPanel>
-                            </Border>
-
-                            <!-- Fan Speed Control -->
-                            <Border Classes="Card" x:Name="FanControlPanel">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="Fan" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="FAN SPEED CONTROL" Classes="SubHeader" />
-                                                <TextBlock Text="// set custom fan speeds for cpu and gpu"
-                                                           Classes="Caption" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[FAN.CTL]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                                            <RadioButton x:Name="AutoFanSpeedRadioButton" GroupName="FanModeGroup"
-                                                         IsChecked="True">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="AutoAwesome" />
-                                                    <TextBlock Text="AUTO" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-
-                                            <RadioButton x:Name="MaxFanSpeedRadioButton" GroupName="FanModeGroup"
-                                                         Click="MaxFanSpeedRadioButton_OnClick">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="Turbine" />
-                                                    <TextBlock Text="MAX" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-
-                                            <RadioButton x:Name="ManualFanSpeedRadioButton" GroupName="FanModeGroup">
-                                                <StackPanel>
-                                                    <material:MaterialIcon Kind="TuneVariant" />
-                                                    <TextBlock Text="MANUAL" HorizontalAlignment="Center" />
-                                                </StackPanel>
-                                            </RadioButton>
-                                        </StackPanel>
-
-                                        <TextBlock x:Name="ManualDisabledInfoText" Classes="Hint"
-                                                   Text="&gt; manual fan controls are disabled to ensure quiet operation"
-                                                   HorizontalAlignment="Center" Margin="0 18 0 0"
-                                                   IsVisible="{Binding ElementName=QuietProfileButton, Path=IsChecked}" />
-
-                                        <StackPanel Margin="0 22 0 0"
-                                                    IsVisible="{Binding ElementName=ManualFanSpeedRadioButton , Path=IsChecked}">
-
-                                            <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto">
-                                                <TextBlock Grid.Row="0" Grid.Column="0" Text="CPU_FAN"
-                                                           Classes="FieldLabel" />
-                                                <Slider x:Name="CpuFanSlider" Grid.Row="0" Grid.Column="1" Value="50" />
-                                                <local:HudPanel Grid.Row="0" Grid.Column="2" Classes="Readout">
-                                                    <TextBlock x:Name="CpuFanTextBlock" Text="50%" />
-                                                </local:HudPanel>
-
-                                                <TextBlock Grid.Row="1" Grid.Column="0" Text="GPU_FAN"
-                                                           Classes="FieldLabel" />
-                                                <Slider x:Name="GpuFanSlider" Grid.Row="1" Grid.Column="1" Value="70" />
-                                                <local:HudPanel Grid.Row="1" Grid.Column="2" Classes="Readout">
-                                                    <TextBlock x:Name="GpuFanTextBlock" Text="70%" />
-                                                </local:HudPanel>
-                                            </Grid>
-
-                                            <Grid ColumnDefinitions="Auto,*" Margin="0 14 0 0">
-                                                <Button x:Name="SetManualSpeedButton" Content="APPLY FAN SETTINGS"
-                                                        Click="SetManualSpeedButton_OnClick" />
-                                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6"
-                                                            HorizontalAlignment="Right" VerticalAlignment="Center">
-                                                    <material:MaterialIcon Kind="AlertOutline" Width="15" Height="15"
-                                                                           Foreground="{StaticResource WarningBrush}" />
-                                                    <TextBlock Text="LOW FAN SPEEDS MAY RESULT IN HIGHER TEMPERATURES"
-                                                               Classes="Caption Warning" />
-                                                </StackPanel>
-                                            </Grid>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </local:HudPanel>
-                            </Border>
-                        </StackPanel>
-                    </ScrollViewer>
-                </TabItem>
-
-                <!-- Power Controls Tab -->
+                <!-- ==================================================== 02 Battery -->
                 <TabItem x:Name="BatteryPanel">
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="03" Classes="NavIndex" />
+                            <TextBlock Text="02" Classes="NavIndex" />
                             <TextBlock Text="BATTERY" />
                         </StackPanel>
                     </TabItem.Header>
-                    <ScrollViewer Classes="Page">
+                    <ScrollViewer Classes="Page" HorizontalScrollBarVisibility="Disabled">
                         <StackPanel>
-                            <Grid Classes="PageHeader" ColumnDefinitions="*,Auto">
-                                <StackPanel>
-                                    <TextBlock Text="POWER CONTROLS" Classes="SectionHeader" />
-                                    <TextBlock Text="&gt; BATTERY HEALTH AND USB CHARGING" Classes="Caption" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Bottom" Spacing="6">
-                                    <TextBlock Text="SEC_03 // BAT" Classes="Tag" HorizontalAlignment="Right" />
-                                    <local:Stripes Width="140" Height="10" />
-                                </StackPanel>
-                            </Grid>
+                            <StackPanel Margin="0 0 0 20">
+                                <TextBlock Text="BATTERY" Classes="PageTitle" />
+                                <TextBlock Text="Battery health and USB charging" Classes="PageCaption" />
+                            </StackPanel>
 
                             <!-- Battery Calibration -->
-                            <Border Classes="Card" x:Name="CalibrationControls">
-                                <local:HudPanel Classes="Card">
+                            <local:HudPanel x:Name="CalibrationControls" Classes="Card" Margin="0 0 0 16">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                        <material:MaterialIcon Kind="BatterySync" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="BATTERY CALIBRATION" Classes="CardTitle" />
+                                            <TextBlock Classes="CardCaption"
+                                                       Text="Full charge, drain and recharge cycle for accurate percentage readings" />
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <Grid ColumnDefinitions="*,Auto">
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="6">
+                                            <TextBlock x:Name="CalibrationStatusTextBlock" Classes="Value"
+                                                       Text="Status: Not calibrating" />
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <material:MaterialIcon Kind="AlertOutline" Width="14" Height="14"
+                                                                       Classes="Danger" />
+                                                <TextBlock Text="Do not unplug AC power during calibration"
+                                                           Classes="Hint Warning" />
+                                            </StackPanel>
+                                        </StackPanel>
+
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                                                    VerticalAlignment="Center" Margin="16 0 0 0">
+                                            <Button x:Name="StopCalibrationButton" Content="STOP" IsEnabled="False" />
+                                            <Button x:Name="StartCalibrationButton" Content="START CALIBRATION"
+                                                    Classes="Primary" />
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </local:HudPanel>
+
+                            <Grid ColumnDefinitions="*,*">
+                                <!-- Charge Limit -->
+                                <local:HudPanel x:Name="LimiterControls" Classes="Card" Grid.Column="0"
+                                                Margin="0 0 8 16">
                                     <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="BatterySync" />
-                                            </Border>
+                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                            <material:MaterialIcon Kind="BatteryHeartVariant" />
                                             <StackPanel Grid.Column="1">
-                                                <TextBlock Text="BATTERY CALIBRATION" Classes="SubHeader" />
-                                                <TextBlock Classes="Caption"
-                                                           Text="// calibrate your battery to get accurate percentage readings" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[CAL]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <Grid ColumnDefinitions="*,Auto">
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock x:Name="CalibrationStatusTextBlock" Margin="0"
-                                                           Text="Status: Not calibrating" FontWeight="Bold"
-                                                           Foreground="{StaticResource AccentBrush}" />
-                                                <TextBlock
-                                                    Text="&gt; full charge, drain and recharge cycle"
-                                                    TextWrapping="Wrap" Margin="0 6 0 0" Classes="Hint" />
-                                                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0 6 0 0">
-                                                    <material:MaterialIcon Kind="AlertOutline" Width="15" Height="15"
-                                                                           Foreground="{StaticResource WarningBrush}" />
-                                                    <TextBlock Text="DO NOT UNPLUG AC POWER DURING CALIBRATION"
-                                                               Classes="Caption Warning" />
-                                                </StackPanel>
-                                            </StackPanel>
-
-                                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10"
-                                                        VerticalAlignment="Center" Margin="20 0 0 0">
-                                                <Button x:Name="StopCalibrationButton" Content="STOP"
-                                                        Classes="Secondary" IsEnabled="False" />
-                                                <Button x:Name="StartCalibrationButton" Content="START CALIBRATION" />
+                                                <TextBlock Text="CHARGE LIMIT" Classes="CardTitle" />
+                                                <TextBlock Classes="CardCaption"
+                                                           Text="Stop charging at 80 % to extend battery lifespan" />
                                             </StackPanel>
                                         </Grid>
+                                        <CheckBox x:Name="BatteryLimitCheckBox" Content="Limit charge to 80 %" />
+                                        <TextBlock Classes="Hint" Margin="0 8 0 0"
+                                                   Text="Recommended when the laptop is usually plugged in." />
                                     </StackPanel>
                                 </local:HudPanel>
-                            </Border>
 
-                            <!-- Charge Limit -->
-                            <Border Classes="Card" x:Name="LimiterControls">
-                                <local:HudPanel Classes="Card">
+                                <!-- USB Power Delivery -->
+                                <local:HudPanel x:Name="UsbChargingPanel" Classes="Card" Grid.Column="1"
+                                                Margin="8 0 0 16">
                                     <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="BatteryHeartVariant" />
-                                            </Border>
+                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                            <material:MaterialIcon Kind="UsbPort" />
                                             <StackPanel Grid.Column="1">
-                                                <TextBlock Text="BATTERY CHARGE LIMIT" Classes="SubHeader" />
-                                                <TextBlock Classes="Caption"
-                                                           Text="// limit maximum charge to 80% to extend battery lifespan" />
+                                                <TextBlock Text="USB POWER-OFF CHARGING" Classes="CardTitle" />
+                                                <TextBlock Classes="CardCaption"
+                                                           Text="Charge USB devices while the laptop is off" />
                                             </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[LIM.80]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
                                         </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <CheckBox x:Name="BatteryLimitCheckBox" Content="ENABLE BATTERY LIMIT (80%)" />
-
-                                        <TextBlock Text="&gt; recommended for laptops that are frequently connected to AC power"
-                                                   Classes="Hint" TextWrapping="Wrap" Margin="0 8 0 0" />
-                                    </StackPanel>
-                                </local:HudPanel>
-                            </Border>
-
-                            <!-- USB Power Delivery -->
-                            <Border Classes="Card" x:Name="UsbChargingPanel">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="UsbPort" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="USB POWER DELIVERY" Classes="SubHeader" />
-                                                <TextBlock Text="// usb charging while the laptop is powered off"
-                                                           Classes="Caption" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[USB.PD]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <ComboBox x:Name="UsbChargingComboBox" SelectedIndex="2" Width="320"
-                                                  HorizontalAlignment="Left"
+                                        <ComboBox x:Name="UsbChargingComboBox" SelectedIndex="2"
+                                                  HorizontalAlignment="Stretch"
                                                   SelectionChanged="UsbChargingComboBox_OnSelectionChanged">
                                             <ComboBoxItem Content="Disabled" />
                                             <ComboBoxItem Content="Until battery reaches 10%" />
@@ -452,425 +244,346 @@
                                         </ComboBox>
                                     </StackPanel>
                                 </local:HudPanel>
-                            </Border>
+                            </Grid>
                         </StackPanel>
-
                     </ScrollViewer>
                 </TabItem>
 
-                <!-- Keyboard Lighting Tab -->
+                <!-- ==================================================== 03 Keyboard -->
                 <TabItem x:Name="KeyboardLightingPanel">
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="04" Classes="NavIndex" />
-                            <TextBlock Text="KEYBOARD RGB" />
+                            <TextBlock Text="03" Classes="NavIndex" />
+                            <TextBlock Text="KEYBOARD" />
                         </StackPanel>
                     </TabItem.Header>
-                    <ScrollViewer Classes="Page">
+                    <ScrollViewer Classes="Page" HorizontalScrollBarVisibility="Disabled">
                         <StackPanel>
-                            <Grid Classes="PageHeader" ColumnDefinitions="*,Auto">
-                                <StackPanel>
-                                    <TextBlock Text="KEYBOARD LIGHTING" Classes="SectionHeader" />
-                                    <TextBlock Text="&gt; ZONE COLOURS, EFFECTS AND BACKLIGHT" Classes="Caption" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Bottom" Spacing="6">
-                                    <TextBlock Text="SEC_04 // RGB" Classes="Tag" HorizontalAlignment="Right" />
-                                    <local:Stripes Width="140" Height="10" />
-                                </StackPanel>
-                            </Grid>
+                            <StackPanel Margin="0 0 0 20">
+                                <TextBlock Text="KEYBOARD LIGHTING" Classes="PageTitle" />
+                                <TextBlock Text="Zone colours, effects and backlight timeout" Classes="PageCaption" />
+                            </StackPanel>
 
                             <local:HudPanel Classes="Notice">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <material:MaterialIcon Kind="FlaskOutline" Width="15" Height="15" />
-                                    <TextBlock Text="WARNING // THIS SECTION REQUIRES TESTING" />
+                                    <material:MaterialIcon Kind="FlaskOutline" Width="14" Height="14" />
+                                    <TextBlock Text="EXPERIMENTAL // THIS SECTION NEEDS MORE TESTING" />
                                 </StackPanel>
                             </local:HudPanel>
 
                             <!-- Zone Color Control -->
-                            <Border Classes="Card" x:Name="ZoneColorControlPanel">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="Palette" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="ZONE COLOR CONTROL" Classes="SubHeader" />
-                                                <TextBlock Text="// customize colors for each keyboard zone"
-                                                           Classes="Caption" />
+                            <local:HudPanel x:Name="ZoneColorControlPanel" Classes="Card" Margin="0 0 0 16">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                        <material:MaterialIcon Kind="Palette" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="ZONE COLOURS" Classes="CardTitle" />
+                                            <TextBlock Text="Static colour for each of the four keyboard zones"
+                                                       Classes="CardCaption" />
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <Grid ColumnDefinitions="*,*,*,*">
+                                        <local:HudPanel Grid.Column="0" Classes="Tile" Margin="0 0 6 0">
+                                            <StackPanel>
+                                                <TextBlock Text="ZONE 01" Classes="TileTitle" />
+                                                <ColorPicker x:Name="Zone1ColorPicker" IsAlphaEnabled="False"
+                                                             IsAlphaVisible="False" Color="#4287f5"
+                                                             HorizontalAlignment="Stretch" Height="36" />
                                             </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[ZONES:4]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
+                                        </local:HudPanel>
+                                        <local:HudPanel Grid.Column="1" Classes="Tile" Margin="6 0 6 0">
+                                            <StackPanel>
+                                                <TextBlock Text="ZONE 02" Classes="TileTitle" />
+                                                <ColorPicker x:Name="Zone2ColorPicker" IsAlphaEnabled="False"
+                                                             HexInputAlphaPosition="Trailing" Color="#ff5733"
+                                                             HorizontalAlignment="Stretch" Height="36" />
+                                            </StackPanel>
+                                        </local:HudPanel>
+                                        <local:HudPanel Grid.Column="2" Classes="Tile" Margin="6 0 6 0">
+                                            <StackPanel>
+                                                <TextBlock Text="ZONE 03" Classes="TileTitle" />
+                                                <ColorPicker x:Name="Zone3ColorPicker" IsAlphaEnabled="False"
+                                                             HexInputAlphaPosition="Trailing" Color="#33ff57"
+                                                             HorizontalAlignment="Stretch" Height="36" />
+                                            </StackPanel>
+                                        </local:HudPanel>
+                                        <local:HudPanel Grid.Column="3" Classes="Tile" Margin="6 0 0 0">
+                                            <StackPanel>
+                                                <TextBlock Text="ZONE 04" Classes="TileTitle" />
+                                                <ColorPicker x:Name="Zone4ColorPicker" IsAlphaEnabled="False"
+                                                             HexInputAlphaPosition="Trailing" Color="#FFFF01"
+                                                             HorizontalAlignment="Stretch" Height="36" />
+                                            </StackPanel>
+                                        </local:HudPanel>
+                                    </Grid>
 
-                                        <Grid ColumnDefinitions="*,*,*,*" ColumnSpacing="12">
-                                            <!-- Zone 1 -->
-                                            <local:HudPanel Grid.Column="0" Classes="Tile">
-                                                <StackPanel>
-                                                    <TextBlock Text="ZONE_01" />
-                                                    <Border x:Name="Zone1Border" Background="#4287f5" Height="30"
-                                                            IsVisible="False" />
-                                                    <ColorPicker x:Name="Zone1ColorPicker"
-                                                                 IsAlphaEnabled="False"
-                                                                 IsAlphaVisible="False"
-                                                                 Color="#4287f5"
-                                                                 HorizontalAlignment="Left"
-                                                                 Height="40"
-                                                                 Width="160" />
-                                                </StackPanel>
-                                            </local:HudPanel>
+                                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="0 16 0 0">
+                                        <TextBlock Grid.Column="0" Text="BRIGHTNESS" Classes="FieldLabel" />
+                                        <Slider x:Name="KeyBrightnessSlider" Grid.Column="1" Minimum="0" Maximum="100"
+                                                TickFrequency="5" IsSnapToTickEnabled="True" Value="100" />
+                                        <local:HudPanel Grid.Column="2" Classes="Readout">
+                                            <TextBlock x:Name="KeyBrightnessText" Text="100%" />
+                                        </local:HudPanel>
+                                    </Grid>
 
-                                            <!-- Zone 2 -->
-                                            <local:HudPanel Grid.Column="1" Classes="Tile">
-                                                <StackPanel>
-                                                    <TextBlock Text="ZONE_02" />
-                                                    <Border x:Name="Zone2Border" Background="#ff5733" Height="30"
-                                                            IsVisible="False" />
-                                                    <ColorPicker x:Name="Zone2ColorPicker"
-                                                                 IsAlphaEnabled="False"
-                                                                 HexInputAlphaPosition="Trailing"
-                                                                 Color="#ff5733"
-                                                                 HorizontalAlignment="Left"
-                                                                 Height="40"
-                                                                 Width="160" />
-                                                </StackPanel>
-                                            </local:HudPanel>
-
-                                            <!-- Zone 3 -->
-                                            <local:HudPanel Grid.Column="2" Classes="Tile">
-                                                <StackPanel>
-                                                    <TextBlock Text="ZONE_03" />
-                                                    <Border x:Name="Zone3Border" Background="#33ff57" Height="30"
-                                                            IsVisible="False" />
-                                                    <ColorPicker x:Name="Zone3ColorPicker"
-                                                                 IsAlphaEnabled="False"
-                                                                 HexInputAlphaPosition="Trailing"
-                                                                 Color="#33ff57"
-                                                                 HorizontalAlignment="Left"
-                                                                 Height="40"
-                                                                 Width="160" />
-                                                </StackPanel>
-                                            </local:HudPanel>
-
-                                            <!-- Zone 4 -->
-                                            <local:HudPanel Grid.Column="3" Classes="Tile">
-                                                <StackPanel>
-                                                    <TextBlock Text="ZONE_04" />
-                                                    <ColorPicker x:Name="Zone4ColorPicker"
-                                                                 IsAlphaEnabled="False"
-                                                                 HexInputAlphaPosition="Trailing"
-                                                                 Color="#FFFF01"
-                                                                 HorizontalAlignment="Left"
-                                                                 Height="40"
-                                                                 Width="160" />
-                                                </StackPanel>
-                                            </local:HudPanel>
-                                        </Grid>
-
-                                        <!-- Brightness -->
-                                        <Grid ColumnDefinitions="Auto,*,Auto" Margin="0 16 0 0">
-                                            <TextBlock Grid.Column="0" Text="BRIGHTNESS" Classes="FieldLabel" />
-                                            <Slider x:Name="KeyBrightnessSlider" Grid.Column="1" Value="100" />
-                                            <local:HudPanel Grid.Column="2" Classes="Readout">
-                                                <TextBlock x:Name="KeyBrightnessText" Text="100%" />
-                                            </local:HudPanel>
-                                        </Grid>
-
-                                        <Button x:Name="ApplyKeyboardColorsButton" Content="APPLY ZONE COLORS"
-                                                Margin="0 14 0 0" />
-                                    </StackPanel>
-                                </local:HudPanel>
-                            </Border>
+                                    <Button x:Name="ApplyKeyboardColorsButton" Content="APPLY ZONE COLOURS"
+                                            Classes="Primary" HorizontalAlignment="Left" Margin="0 16 0 0" />
+                                </StackPanel>
+                            </local:HudPanel>
 
                             <!-- Lighting Effects -->
-                            <Border Classes="Card" x:Name="KeyboardEffectsPanel">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="AutoFix" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="LIGHTING EFFECTS" Classes="SubHeader" />
-                                                <TextBlock Text="// choose dynamic lighting effects for your keyboard"
-                                                           Classes="Caption" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[FX]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
+                            <local:HudPanel x:Name="KeyboardEffectsPanel" Classes="Card" Margin="0 0 0 16">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                        <material:MaterialIcon Kind="AutoFix" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="LIGHTING EFFECTS" Classes="CardTitle" />
+                                            <TextBlock Text="Dynamic effects for the whole keyboard"
+                                                       Classes="CardCaption" />
+                                        </StackPanel>
+                                    </Grid>
 
-                                        <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto"
-                                              RowSpacing="14">
-                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="MODE" Classes="FieldLabel" />
-                                            <ComboBox x:Name="LightingModeComboBox" Grid.Row="0" Grid.Column="1"
-                                                      SelectedIndex="0" Width="220" HorizontalAlignment="Left">
-                                                <ComboBoxItem Content="Static Mode" />
-                                                <ComboBoxItem Content="Breathing Mode" />
-                                                <ComboBoxItem Content="Neon Mode" />
-                                                <ComboBoxItem Content="Wave Mode" />
-                                                <ComboBoxItem Content="Shifting Mode" />
-                                                <ComboBoxItem Content="Zoom Mode" />
-                                                <ComboBoxItem Content="Meteor Mode" />
-                                                <ComboBoxItem Content="Twinkling Mode" />
-                                            </ComboBox>
+                                    <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="MODE" Classes="FieldLabel" />
+                                        <ComboBox x:Name="LightingModeComboBox" Grid.Row="0" Grid.Column="1"
+                                                  SelectedIndex="0" MinWidth="220" HorizontalAlignment="Left"
+                                                  Margin="0 0 0 12">
+                                            <ComboBoxItem Content="Static Mode" />
+                                            <ComboBoxItem Content="Breathing Mode" />
+                                            <ComboBoxItem Content="Neon Mode" />
+                                            <ComboBoxItem Content="Wave Mode" />
+                                            <ComboBoxItem Content="Shifting Mode" />
+                                            <ComboBoxItem Content="Zoom Mode" />
+                                            <ComboBoxItem Content="Meteor Mode" />
+                                            <ComboBoxItem Content="Twinkling Mode" />
+                                        </ComboBox>
 
-                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="SPEED" Classes="FieldLabel" />
-                                            <Slider x:Name="LightingSpeedSlider" Grid.Row="1" Grid.Column="1" Value="5"
-                                                    Maximum="9" Minimum="0" IsSnapToTickEnabled="True" TickFrequency="1" />
-                                            <local:HudPanel Grid.Row="1" Grid.Column="2" Classes="Readout">
-                                                <TextBlock x:Name="LightSpeedTextBlock" Text="5" />
-                                            </local:HudPanel>
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="SPEED" Classes="FieldLabel" />
+                                        <Slider x:Name="LightingSpeedSlider" Grid.Row="1" Grid.Column="1" Value="5"
+                                                Minimum="0" Maximum="9" IsSnapToTickEnabled="True" TickFrequency="1"
+                                                Margin="0 0 0 12" />
+                                        <local:HudPanel Grid.Row="1" Grid.Column="2" Classes="Readout"
+                                                        Margin="12 0 0 12">
+                                            <TextBlock x:Name="LightSpeedTextBlock" Text="5" />
+                                        </local:HudPanel>
 
-                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="COLOR" Classes="FieldLabel" />
-                                            <ColorPicker x:Name="LightEffectColorPicker" Grid.Row="2" Grid.Column="1"
-                                                         IsAlphaEnabled="False"
-                                                         HexInputAlphaPosition="Trailing"
-                                                         Color="#FFFF01"
-                                                         HorizontalAlignment="Left"
-                                                         Height="40"
-                                                         Width="220" />
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="COLOUR" Classes="FieldLabel" />
+                                        <ColorPicker x:Name="LightEffectColorPicker" Grid.Row="2" Grid.Column="1"
+                                                     IsAlphaEnabled="False" HexInputAlphaPosition="Trailing"
+                                                     Color="#FFFF01" HorizontalAlignment="Left"
+                                                     Height="36" Width="220" Margin="0 0 0 12" />
 
-                                            <TextBlock Grid.Row="3" Grid.Column="0" Text="DIRECTION"
-                                                       Classes="FieldLabel" />
-                                            <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal"
-                                                        Spacing="12">
-                                                <RadioButton x:Name="LeftToRightRadioButton" GroupName="DirectionGroup"
-                                                             IsChecked="True">
-                                                    <StackPanel>
-                                                        <material:MaterialIcon Kind="ArrowRight" />
-                                                        <TextBlock Text="L-TO-R" HorizontalAlignment="Center" />
-                                                    </StackPanel>
-                                                </RadioButton>
-                                                <RadioButton x:Name="RightToLeftRadioButton" GroupName="DirectionGroup">
-                                                    <StackPanel>
-                                                        <material:MaterialIcon Kind="ArrowLeft" />
-                                                        <TextBlock Text="R-TO-L" HorizontalAlignment="Center" />
-                                                    </StackPanel>
-                                                </RadioButton>
-                                            </StackPanel>
-                                        </Grid>
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="DIRECTION"
+                                                   Classes="FieldLabel" />
+                                        <UniformGrid Grid.Row="3" Grid.Column="1" Rows="1" HorizontalAlignment="Left"
+                                                     Width="260">
+                                            <RadioButton x:Name="LeftToRightRadioButton" GroupName="DirectionGroup"
+                                                         Theme="{StaticResource SegmentRadio}" IsChecked="True"
+                                                         Margin="0 0 6 0">
+                                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                                    <material:MaterialIcon Kind="ArrowRight" Width="14" Height="14" />
+                                                    <TextBlock Text="L → R" />
+                                                </StackPanel>
+                                            </RadioButton>
+                                            <RadioButton x:Name="RightToLeftRadioButton" GroupName="DirectionGroup"
+                                                         Theme="{StaticResource SegmentRadio}">
+                                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                                    <material:MaterialIcon Kind="ArrowLeft" Width="14" Height="14" />
+                                                    <TextBlock Text="R → L" />
+                                                </StackPanel>
+                                            </RadioButton>
+                                        </UniformGrid>
+                                    </Grid>
 
-                                        <Button x:Name="LightingEffectsApplyButton" Content="APPLY EFFECT"
-                                                Margin="0 18 0 0" />
-                                    </StackPanel>
-                                </local:HudPanel>
-                            </Border>
+                                    <Button x:Name="LightingEffectsApplyButton" Content="APPLY EFFECT"
+                                            Classes="Primary" HorizontalAlignment="Left" Margin="0 16 0 0" />
+                                </StackPanel>
+                            </local:HudPanel>
 
                             <!-- Backlight Timeout -->
-                            <Border Classes="Card" x:Name="BacklightTimeoutControls">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="TimerOutline" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="BACKLIGHT TIMEOUT" Classes="SubHeader" />
-                                                <TextBlock Classes="Caption"
-                                                           Text="// turn off keyboard lighting after a period of inactivity" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[T:30S]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <CheckBox x:Name="BacklightTimeoutCheckBox"
-                                                  Content="ENABLE BACKLIGHT TIMEOUT (30 SECONDS)" IsChecked="True" />
-                                    </StackPanel>
-                                </local:HudPanel>
-                            </Border>
-
+                            <local:HudPanel x:Name="BacklightTimeoutControls" Classes="Card" Margin="0 0 0 16">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                        <material:MaterialIcon Kind="TimerOutline" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="BACKLIGHT TIMEOUT" Classes="CardTitle" />
+                                            <TextBlock Classes="CardCaption"
+                                                       Text="Turn the keyboard lighting off after 30 s of inactivity" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <CheckBox x:Name="BacklightTimeoutCheckBox"
+                                              Content="Enable backlight timeout (30 seconds)" IsChecked="True" />
+                                </StackPanel>
+                            </local:HudPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
 
-                <!-- System Settings Tab -->
+                <!-- ==================================================== 04 System -->
                 <TabItem x:Name="SystemSettingsPanel">
                     <TabItem.Header>
                         <StackPanel Classes="NavHeader" Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="05" Classes="NavIndex" />
+                            <TextBlock Text="04" Classes="NavIndex" />
                             <TextBlock Text="SYSTEM" />
                         </StackPanel>
                     </TabItem.Header>
-                    <ScrollViewer Classes="Page">
+                    <ScrollViewer Classes="Page" HorizontalScrollBarVisibility="Disabled">
                         <StackPanel>
-                            <Grid Classes="PageHeader" ColumnDefinitions="*,Auto">
-                                <StackPanel>
-                                    <TextBlock Text="SYSTEM SETTINGS" Classes="SectionHeader" />
-                                    <TextBlock Text="&gt; DISPLAY, BOOT AND SYSTEM INFORMATION" Classes="Caption" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Bottom" Spacing="6">
-                                    <TextBlock Text="SEC_05 // SYS" Classes="Tag" HorizontalAlignment="Right" />
-                                    <local:Stripes Width="140" Height="10" />
-                                </StackPanel>
-                            </Grid>
+                            <StackPanel Margin="0 0 0 20">
+                                <TextBlock Text="SYSTEM" Classes="PageTitle" />
+                                <TextBlock Text="Display, boot and system information" Classes="PageCaption" />
+                            </StackPanel>
 
-                            <!-- LCD Override -->
-                            <Border Classes="Card" x:Name="LcdOverrideControls">
-                                <local:HudPanel Classes="Card">
+                            <Grid ColumnDefinitions="*,*">
+                                <!-- LCD Override -->
+                                <local:HudPanel x:Name="LcdOverrideControls" Classes="Card" Grid.Column="0"
+                                                Margin="0 0 8 16">
                                     <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="MonitorShimmer" />
-                                            </Border>
+                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                            <material:MaterialIcon Kind="MonitorShimmer" />
                                             <StackPanel Grid.Column="1">
-                                                <TextBlock Text="LCD OVERRIDE" Classes="SubHeader" />
-                                                <TextBlock Text="// reduce lcd latency and minimize ghosting"
-                                                           Classes="Caption" />
+                                                <TextBlock Text="LCD OVERRIDE" Classes="CardTitle" />
+                                                <TextBlock Text="Reduce LCD latency and minimize ghosting"
+                                                           Classes="CardCaption" />
                                             </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[LCD]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
                                         </Grid>
-                                        <Border Classes="Rule" />
-
-                                        <CheckBox x:Name="LcdOverrideCheckBox" Content="ENABLE LCD OVERRIDE"
+                                        <CheckBox x:Name="LcdOverrideCheckBox" Content="Enable LCD override"
                                                   IsChecked="True" />
                                         <StackPanel Orientation="Horizontal" Spacing="6" Margin="0 8 0 0">
-                                            <material:MaterialIcon Kind="AlertOutline" Width="15" Height="15"
-                                                                   Foreground="{StaticResource WarningBrush}" />
-                                            <TextBlock Text="MAY INCREASE BATTERY CONSUMPTION" Classes="Caption Warning" />
+                                            <material:MaterialIcon Kind="AlertOutline" Width="14" Height="14"
+                                                                   Classes="Danger" />
+                                            <TextBlock Text="May increase battery consumption" Classes="Hint Warning" />
                                         </StackPanel>
                                     </StackPanel>
                                 </local:HudPanel>
-                            </Border>
 
-                            <!-- Boot Sound and Animation -->
-                            <Border Classes="Card" x:Name="BootSoundControls">
-                                <local:HudPanel Classes="Card">
+                                <!-- Boot Sound and Animation -->
+                                <local:HudPanel x:Name="BootSoundControls" Classes="Card" Grid.Column="1"
+                                                Margin="8 0 0 16">
                                     <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="MusicNoteOutline" />
-                                            </Border>
+                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                            <material:MaterialIcon Kind="MusicNoteOutline" />
                                             <StackPanel Grid.Column="1">
-                                                <TextBlock Text="BOOT SOUND AND ANIMATION" Classes="SubHeader" />
-                                                <TextBlock Text="// enable or disable custom boot animation and sound"
-                                                           Classes="Caption" />
+                                                <TextBlock Text="BOOT ANIMATION + SOUND" Classes="CardTitle" />
+                                                <TextBlock Text="Custom boot animation and sound"
+                                                           Classes="CardCaption" />
                                             </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[BOOT]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
                                         </Grid>
-                                        <Border Classes="Rule" />
-
                                         <CheckBox x:Name="BootAnimAndSoundCheckBox"
-                                                  Content="ENABLE BOOT ANIMATION AND SOUND" IsChecked="False" />
+                                                  Content="Enable boot animation and sound" IsChecked="False" />
                                     </StackPanel>
                                 </local:HudPanel>
-                            </Border>
+                            </Grid>
 
                             <!-- System Information -->
-                            <Border Classes="Card">
-                                <local:HudPanel Classes="Card">
-                                    <StackPanel>
-                                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto">
-                                            <Border Classes="IconBadge">
-                                                <material:MaterialIcon Kind="InformationOutline" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="SYSTEM INFORMATION" Classes="SubHeader" />
-                                                <TextBlock Text="// detected hardware and component versions"
-                                                           Classes="Caption" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="[SYS.INFO]" Classes="Tag"
-                                                       VerticalAlignment="Top" />
-                                        </Grid>
-                                        <Border Classes="Rule" />
+                            <local:HudPanel Classes="Card" Margin="0 0 0 16">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                                        <material:MaterialIcon Kind="InformationOutline" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="SYSTEM INFORMATION" Classes="CardTitle" />
+                                            <TextBlock Text="Detected hardware and component versions"
+                                                       Classes="CardCaption" />
+                                        </StackPanel>
+                                    </Grid>
 
-                                        <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                                            <TextBlock Text="MODEL" Classes="Key" />
-                                            <local:DotLeader Grid.Column="1" />
-                                            <TextBlock x:Name="ModelNameText" Grid.Column="2" Text="UNKNOWN"
-                                                       Classes="Value" />
-                                        </Grid>
-                                        <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                                            <TextBlock Text="LAPTOP_TYPE" Classes="Key" />
-                                            <local:DotLeader Grid.Column="1" />
-                                            <TextBlock x:Name="LaptopTypeText" Grid.Column="2" Text="UNKNOWN"
-                                                       Classes="Value" />
-                                        </Grid>
-                                        <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                                            <TextBlock Text="DAEMON_VER" Classes="Key" />
-                                            <local:DotLeader Grid.Column="1" />
-                                            <TextBlock x:Name="DaemonVersionText" Grid.Column="2" Text="UNKNOWN"
-                                                       Classes="Value" />
-                                        </Grid>
-                                        <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                                            <TextBlock Text="DRIVER_VER" Classes="Key" />
-                                            <local:DotLeader Grid.Column="1" />
-                                            <TextBlock x:Name="DriverVersionText" Grid.Column="2" Text="UNKNOWN"
-                                                       Classes="Value" />
-                                        </Grid>
-                                        <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
-                                            <TextBlock Text="PROJECT_VER" Classes="Key" />
-                                            <local:DotLeader Grid.Column="1" />
-                                            <TextBlock x:Name="ProjectVersionText" Grid.Column="2" Text="UNKNOWN"
-                                                       Classes="Value" />
-                                        </Grid>
-                                        <Grid Classes="KeyValue" ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
-                                            <TextBlock Text="FEATURES" Classes="Key" />
-                                            <local:DotLeader Grid.Column="1" />
-                                            <TextBlock x:Name="SupportedFeaturesTextBlock" Grid.Row="1"
-                                                       Grid.ColumnSpan="2" Text="UNKNOWN" Margin="0 8 0 0"
-                                                       Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
-                                        </Grid>
-
-                                        <WrapPanel Orientation="Horizontal" Margin="0 16 0 0" ItemSpacing="10"
-                                                   LineSpacing="10">
-                                            <Button x:Name="UpdatesButton" Content="CHECK FOR UPDATES"
-                                                    Click="UpdatesButton_OnClick" />
-                                            <Button x:Name="DeveloperModeButton" Content="DEVELOPER MODE"
-                                                    Classes="Secondary"
-                                                    IsVisible="False"
-                                                    Click="DeveloperMode_OnClick" />
-                                            <Button x:Name="IssuePageButton" Content="ISSUE / FEEDBACK"
-                                                    Classes="Secondary"
-                                                    Click="IssuePageButton_OnClick" />
-                                            <Button x:Name="InternalsManagerButton" Content="INTERNALS MANAGER"
-                                                    Classes="Secondary"
-                                                    Click="InternalsMangerWindow_OnClick" />
-                                        </WrapPanel>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="MODEL" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="ModelNameText" Grid.Column="2" Text="UNKNOWN"
+                                                   Classes="Value" />
+                                    </Grid>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="LAPTOP TYPE" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="LaptopTypeText" Grid.Column="2" Text="UNKNOWN"
+                                                   Classes="Value" />
+                                    </Grid>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="DAEMON" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="DaemonVersionText" Grid.Column="2" Text="UNKNOWN"
+                                                   Classes="Value" />
+                                    </Grid>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="DRIVER" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="DriverVersionText" Grid.Column="2" Text="UNKNOWN"
+                                                   Classes="Value" />
+                                    </Grid>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="APP" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="ProjectVersionText" Grid.Column="2" Text="UNKNOWN"
+                                                   Classes="Value" />
+                                    </Grid>
+                                    <StackPanel Margin="0 8 0 0">
+                                        <TextBlock Text="FEATURES" Classes="Label" />
+                                        <TextBlock x:Name="SupportedFeaturesTextBlock" Text="UNKNOWN" Classes="Value"
+                                                   Margin="0 6 0 0" TextWrapping="Wrap"
+                                                   Foreground="{StaticResource InkSecondaryBrush}" />
                                     </StackPanel>
-                                </local:HudPanel>
-                            </Border>
+
+                                    <WrapPanel Orientation="Horizontal" Margin="0 20 0 0">
+                                        <Button x:Name="UpdatesButton" Content="CHECK FOR UPDATES" Classes="Spaced"
+                                                Click="UpdatesButton_OnClick" />
+                                        <Button x:Name="DeveloperModeButton" Content="DEVELOPER MODE"
+                                                Classes="Spaced" IsVisible="False"
+                                                Click="DeveloperMode_OnClick" />
+                                        <Button x:Name="IssuePageButton" Content="ISSUES / FEEDBACK"
+                                                Classes="Spaced" Click="IssuePageButton_OnClick" />
+                                        <Button x:Name="InternalsManagerButton" Content="INTERNALS MANAGER"
+                                                Classes="Spaced" Click="InternalsMangerWindow_OnClick" />
+                                    </WrapPanel>
+                                </StackPanel>
+                            </local:HudPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
             </TabControl>
         </Grid>
 
-        <!-- CRT scanlines over everything (not hit-testable) -->
-        <local:Scanlines Fill="{StaticResource ScanlineBrush}" Pitch="3" ZIndex="50" />
+        <!-- ============================================================ Status toast (non-blocking) -->
+        <local:HudPanel x:Name="StatusToast" Grid.Row="1" Classes="Toast" IsVisible="False" ZIndex="90"
+                        HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0 0 24 24"
+                        MaxWidth="560">
+            <Grid ColumnDefinitions="Auto,*">
+                <Ellipse x:Name="StatusToastDot" Classes="StatusDot" Margin="0 4 10 0" VerticalAlignment="Top" />
+                <TextBlock x:Name="StatusToastText" Grid.Column="1" TextWrapping="Wrap"
+                           Foreground="{StaticResource InkBrush}" />
+            </Grid>
+        </local:HudPanel>
 
-        <!-- Overlay Grid (on separate layer) -->
-        <Grid x:Name="DaemonErrorGrid" Panel.ZIndex="100" Background="#CC050807" IsHitTestVisible="True"
-              IsVisible="True">
-            <local:HudPanel Width="460" HorizontalAlignment="Center" VerticalAlignment="Center"
-                            Cut="18" Padding="30 26"
+        <!-- ============================================================ Daemon overlay -->
+        <Grid x:Name="DaemonErrorGrid" Grid.Row="1" ZIndex="100" Background="{StaticResource OverlayScrimBrush}"
+              IsHitTestVisible="True" IsVisible="True">
+            <local:HudPanel Width="540" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Cut="16" Padding="28 24"
                             Background="{StaticResource SurfaceBrush}"
-                            BorderBrush="{StaticResource DangerBrush}"
-                            AccentBrush="{StaticResource DangerBrush}" AccentLength="90">
-                <StackPanel Spacing="6">
+                            BorderBrush="{StaticResource LineStrongBrush}"
+                            AccentBrush="{StaticResource DangerBrush}" AccentLength="80"
+                            TickBrush="{StaticResource Ink40Brush}" TickLength="8">
+                <StackPanel Spacing="8">
                     <Grid ColumnDefinitions="Auto,*">
-                        <material:MaterialIcon Kind="LanDisconnect" Foreground="{StaticResource DangerBrush}"
-                                               Width="26" Height="26" VerticalAlignment="Center" />
-                        <TextBlock Grid.Column="1" Text="LINK FAILURE" Margin="12 0 0 0"
-                                   FontFamily="{StaticResource DisplayFont}" FontWeight="Bold"
-                                   FontSize="22" LetterSpacing="4" VerticalAlignment="Center"
-                                   Foreground="{StaticResource DangerBrush}" />
+                        <material:MaterialIcon Kind="LanDisconnect" Classes="Danger"
+                                               Width="22" Height="22" VerticalAlignment="Center" />
+                        <TextBlock x:Name="DaemonErrorTitle" Grid.Column="1" Text="DAEMON OFFLINE"
+                                   Margin="12 0 0 0" Classes="PageTitle" VerticalAlignment="Center" />
                     </Grid>
-                    <local:Stripes Height="6" Margin="0 10 0 6" Fill="#66FF5F5F" />
+                    <Border Classes="Rule" Margin="0 8 0 8" />
 
-                    <TextBlock Text="&gt; STATUS: DAEMON NOT CONNECTED" Margin="0" FontWeight="Bold" />
-                    <TextBlock Text="&gt; daemon may be initializing. please wait a minute."
-                               Classes="Hint" Margin="0" TextWrapping="Wrap" />
-                    <TextBlock Text="&gt; if the issue persists, check the logs."
-                               Classes="Hint" Margin="0 0 0 14" TextWrapping="Wrap" />
+                    <TextBlock x:Name="DaemonErrorMessage" TextWrapping="Wrap" Classes="Body"
+                               Text="Connecting to the DAMX daemon…" />
+                    <TextBlock Classes="Hint" Margin="0 0 0 12"
+                               Text="The daemon may still be initializing. Logs: /var/log/DAMX_Daemon_Log.log" />
 
-                    <Button Content="RETRY CONNECTION"
-                            HorizontalAlignment="Left"
-                            Click="RetryConnectionButton_OnClick" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="RETRY CONNECTION" Classes="Primary"
+                                Click="RetryConnectionButton_OnClick" />
+                        <Button Content="CONTINUE OFFLINE"
+                                Click="DismissDaemonErrorButton_OnClick" />
+                    </StackPanel>
                 </StackPanel>
             </local:HudPanel>
         </Grid>

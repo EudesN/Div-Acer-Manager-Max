@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
@@ -10,10 +11,13 @@ namespace DivAcerManagerMax;
 public partial class InternalsManager : Window
 {
     private const string logPath = "/var/log/DAMX_Daemon_Log.log";
-    private readonly bool _isInitializing;
+    private const string RemoveParameterCommand = "remove_modprobe_parameter";
+
     private readonly MainWindow _mainWindow;
-    private bool _isProcessingParameterChange;
+    private bool _isBusy;
+    private bool _isInitializing;
     private int _lastSelectedIndex = -1;
+    private bool _suppressSelectionEvents;
 
     public InternalsManager(MainWindow mainWindow)
     {
@@ -22,22 +26,69 @@ public partial class InternalsManager : Window
         _mainWindow = mainWindow;
         InitializeUiComponents();
         _isInitializing = false;
+
+        // The cached settings may be stale (or absent): read the real value from the daemon.
+        Opened += async (_, _) => await RefreshModprobeParameterStateAsync();
     }
+
+    private DAMXClient Client => _mainWindow._client;
 
     public void InitializeUiComponents()
     {
         DevModeToggleSwitch.IsChecked = MainWindow.AppState.DevMode;
 
-        ForceParameterPermanentlyComboBox.SelectedIndex = _mainWindow._settings.ModprobeParameter switch
+        // Null-safe: _settings is null when the daemon has never been reached.
+        SetComboSelection(ParameterToIndex(_mainWindow._settings?.ModprobeParameter));
+    }
+
+    private static int ParameterToIndex(string? parameter)
+    {
+        return parameter?.Trim() switch
         {
             "predator_v4" => 1,
             "nitro_v4" => 2,
             "enable_all" => 3,
-            _ => 0 // Default to "No Parameter" for empty string or unknown values
+            _ => 0 // "No Parameter" for empty string or unknown values
         };
+    }
 
-        // Store the initial selection to prevent unnecessary triggers
-        _lastSelectedIndex = ForceParameterPermanentlyComboBox.SelectedIndex;
+    /// <summary>Changes the combobox without triggering a daemon command.</summary>
+    private void SetComboSelection(int index)
+    {
+        _suppressSelectionEvents = true;
+        try
+        {
+            ForceParameterPermanentlyComboBox.SelectedIndex = index;
+            _lastSelectedIndex = index;
+        }
+        finally
+        {
+            _suppressSelectionEvents = false;
+        }
+    }
+
+    private void SetStatus(string message, bool isError)
+    {
+        Console.WriteLine(isError ? $"[internals][error] {message}" : $"[internals] {message}");
+        var status = this.FindControl<TextBlock>("InternalsStatusText");
+        if (status == null) return;
+        status.Text = message;
+        status.Classes.Remove("Warning");
+        if (isError) status.Classes.Add("Warning");
+    }
+
+    private void SetBusy(bool busy)
+    {
+        _isBusy = busy;
+        foreach (var name in new[]
+                 {
+                     "ForceNitroButton", "ForcePredatorButton", "ForceEnableAll", "RestartSuiteButton",
+                     "RestartDaemon", "ForceParameterPermanentlyComboBox"
+                 })
+        {
+            var control = this.FindControl<Control>(name);
+            if (control != null) control.IsEnabled = !busy;
+        }
     }
 
     private void DevModeSwitch_OnClick(object? sender, RoutedEventArgs e)
@@ -52,84 +103,246 @@ public partial class InternalsManager : Window
 
     private void DaemonLogsButton_OnClick(object? sender, RoutedEventArgs e)
     {
-        Process.Start("xdg-open", logPath);
+        try
+        {
+            Process.Start(new ProcessStartInfo("xdg-open", logPath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not open {logPath}: {ex.Message}", true);
+        }
     }
 
     private async void RestartSuiteButton_OnClick(object? sender, RoutedEventArgs e)
     {
-        try
-        {
-            if (_mainWindow._client.IsConnected)
-                _mainWindow._client.SendCommandAsync("restart_drivers_and_daemon");
-            Console.WriteLine("Restart suite command sent");
-            await Task.Delay(1000);
-
-            ReinitializeDamxGUI();
-            await ShowMessagebox("Restarting Suite", "Restarting Suite and refreshing GUI, please wait");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error in RestartSuiteButton: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to restart suite: {ex.Message}");
-        }
-    }
-
-    private async void ForcePredatorButton_OnClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (_mainWindow._client.IsConnected)
-                _mainWindow._client.SendCommandAsync("force_predator_model");
-            Console.WriteLine("Force Predator Model Command Sent");
-            await Task.Delay(1000);
-            ReinitializeDamxGUI();
-            await ShowMessagebox("Forcing Predator Model",
-                "Restarting Drivers with predator_v4 parameter with daemon and refreshing GUI, please wait");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error in ForcePredatorButton: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to force predator model: {ex.Message}");
-        }
-    }
-
-    private async void ForceNitroButton_OnClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (_mainWindow._client.IsConnected)
-                _mainWindow._client.SendCommandAsync("force_nitro_model");
-            Console.WriteLine("Force Nitro Model Command Sent");
-            await Task.Delay(1000);
-            ReinitializeDamxGUI();
-            await ShowMessagebox("Forcing Nitro Model",
-                "Restarting Drivers with nitro_v4 parameter with daemon and refreshing GUI, please wait");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error in ForceNitroButton: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to force nitro model: {ex.Message}");
-        }
+        await RunPrivilegedAsync("restart_drivers_and_daemon", "Restarting drivers and daemon");
     }
 
     private async void RestartDaemon_OnClick(object? sender, RoutedEventArgs e)
     {
+        await RunPrivilegedAsync("restart_daemon", "Restarting daemon");
+    }
+
+    private async void ForcePredatorButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        await RunPrivilegedAsync("force_predator_model", "Loading driver with predator_v4");
+    }
+
+    private async void ForceNitroButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        await RunPrivilegedAsync("force_nitro_model", "Loading driver with nitro_v4");
+    }
+
+    private async void ForceEnableAll_OnClick(object? sender, RoutedEventArgs e)
+    {
+        await RunPrivilegedAsync("force_enable_all", "Loading driver with enable_all");
+    }
+
+    /// <summary>
+    ///     Sends a command that reloads the driver and/or restarts the daemon. The reply is awaited;
+    ///     losing the connection afterwards is expected (the daemon restarts). A {"success": false}
+    ///     reply (e.g. "permission denied: ...") is shown to the user.
+    /// </summary>
+    private async Task RunPrivilegedAsync(string command, string actionName)
+    {
+        if (_isBusy) return;
+        SetBusy(true);
+
         try
         {
-            if (_mainWindow._client.IsConnected)
-                _mainWindow._client.SendCommandAsync("restart_daemon");
-            Console.WriteLine("restart_daemon Command Sent");
+            if (!await EnsureConnectedAsync()) return;
 
-            await Task.Delay(1000);
-            ReinitializeDamxGUI();
-            await ShowMessagebox("Restarting Daemon",
-                "Restarting Daemon refreshing GUI, please wait");
+            SetStatus($"{actionName}…", false);
+            var outcome = await SendExpectingRestartAsync(command);
+            if (outcome.Error != null)
+            {
+                SetStatus($"{actionName} failed: {outcome.Error}", true);
+                return;
+            }
+
+            await WaitForDaemonAndRefreshAsync(actionName);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error in RestartDaemon: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to restart daemon: {ex.Message}");
+            SetStatus($"{actionName} failed: {ex.Message}", true);
         }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    private async Task<bool> EnsureConnectedAsync()
+    {
+        if (await Client.ConnectAsync()) return true;
+
+        SetStatus(Client.State == DaemonConnectionState.PermissionDenied
+            ? DaemonPermissionException.UserMessage
+            : $"Daemon is not connected: {Client.LastError}", true);
+        return false;
+    }
+
+    /// <summary>Result of a command after which the daemon may restart.</summary>
+    private sealed class RestartOutcome
+    {
+        public string? Error { get; init; }
+        public bool ConnectionLost { get; init; }
+        public DaemonResult? Result { get; init; }
+    }
+
+    private async Task<RestartOutcome> SendExpectingRestartAsync(string command)
+    {
+        try
+        {
+            var result = await Client.SendCommandResultAsync(command);
+            return result.Success
+                ? new RestartOutcome { Result = result }
+                : new RestartOutcome { Result = result, Error = result.Error ?? "unknown error" };
+        }
+        catch (DaemonPermissionException ex)
+        {
+            return new RestartOutcome { Error = ex.Message };
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException)
+        {
+            // The command was delivered and the daemon went away while handling it (old daemons
+            // restart before replying). The real state is read back afterwards.
+            Console.WriteLine($"'{command}': connection lost after sending ({ex.Message}); assuming restart");
+            return new RestartOutcome { ConnectionLost = true };
+        }
+    }
+
+    /// <summary>Polls until the daemon answers again, then reloads settings and the modprobe state.</summary>
+    private async Task WaitForDaemonAndRefreshAsync(string actionName)
+    {
+        SetStatus($"{actionName}: waiting for the daemon…", false);
+
+        var back = false;
+        await Task.Delay(3000);
+        for (var attempt = 0; attempt < 15 && !back; attempt++)
+        {
+            back = await _mainWindow.ReloadFromDaemonAsync();
+            if (!back) await Task.Delay(2000);
+        }
+
+        if (!back)
+        {
+            SetStatus($"{actionName}: the daemon did not come back within 30 s. Check the logs.", true);
+            return;
+        }
+
+        await RefreshModprobeParameterStateAsync();
+        SetStatus($"{actionName}: done.", false);
+
+        // The daemon may restart a few seconds after replying; re-read once more so the feature
+        // set and the parameter shown come from the new instance.
+        await Task.Delay(6000);
+        if (await _mainWindow.ReloadFromDaemonAsync())
+            await RefreshModprobeParameterStateAsync();
+    }
+
+    private async void ForceParameterPermanently_OnSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_isInitializing || _suppressSelectionEvents || _isBusy) return;
+
+        if (sender is not ComboBox comboBox || comboBox.SelectedIndex == -1) return;
+
+        // Check if this is a real change
+        if (comboBox.SelectedIndex == _lastSelectedIndex) return;
+
+        var previousIndex = _lastSelectedIndex;
+        var newIndex = comboBox.SelectedIndex;
+        _lastSelectedIndex = newIndex;
+
+        SetBusy(true);
+        try
+        {
+            var (command, actionName) = newIndex switch
+            {
+                1 => ("set_modprobe_parameter_predator", "Setting permanent predator_v4"),
+                2 => ("set_modprobe_parameter_nitro", "Setting permanent nitro_v4"),
+                3 => ("set_modprobe_parameter_enable_all", "Setting permanent enable_all"),
+                _ => (RemoveParameterCommand, "Removing permanent parameter")
+            };
+
+            var ok = await SendParameterCommand(command, actionName);
+            if (!ok) SetComboSelection(previousIndex < 0 ? 0 : previousIndex);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in ForceParameterPermanently_OnSelectionChanged: {ex}");
+            SetStatus($"Failed to change parameter: {ex.Message}", true);
+            SetComboSelection(previousIndex < 0 ? 0 : previousIndex);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    /// <summary>
+    ///     Applies a permanent modprobe parameter (GitHub #191/#48/#118). The set/remove command is awaited
+    ///     and its result checked. "set_modprobe_parameter_*" makes the daemon reload the module itself
+    ///     (after replying), so no separate restart is sent. "remove_modprobe_parameter" only deletes the
+    ///     config file, so an explicit driver reload is requested unless the daemon says it already
+    ///     scheduled one. Afterwards the value is read back from the daemon (never from the stale cache).
+    /// </summary>
+    private async Task<bool> SendParameterCommand(string command, string actionName)
+    {
+        if (!await EnsureConnectedAsync()) return false;
+
+        SetStatus($"{actionName}…", false);
+        var outcome = await SendExpectingRestartAsync(command);
+        if (outcome.Error != null)
+        {
+            SetStatus($"{actionName} failed: {outcome.Error}", true);
+            return false;
+        }
+
+        if (command == RemoveParameterCommand && !outcome.ConnectionLost && !DaemonWillReload(outcome.Result))
+        {
+            var reload = await SendExpectingRestartAsync("restart_drivers_and_daemon");
+            if (reload.Error != null)
+            {
+                // The file is gone; only the reload failed. Show it, but keep the new selection.
+                SetStatus($"Parameter removed, but reloading the driver failed: {reload.Error}", true);
+                await RefreshModprobeParameterStateAsync();
+                return true;
+            }
+        }
+
+        await WaitForDaemonAndRefreshAsync(actionName);
+        return true;
+    }
+
+    private static bool DaemonWillReload(DaemonResult? result)
+    {
+        if (result == null) return false;
+        if (result.GetDataBool("reload_scheduled") || result.GetDataBool("reloading")) return true;
+        var message = result.Message ?? "";
+        return message.Contains("reload", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("restart", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Reads the parameter with get_modprobe_parameter and updates the cache + combobox.</summary>
+    public async Task RefreshModprobeParameterStateAsync()
+    {
+        try
+        {
+            var parameter = await Client.GetModprobeParameterAsync() ?? "";
+            _mainWindow.UpdateModprobeParameter(parameter);
+            SetComboSelection(ParameterToIndex(parameter));
+        }
+        catch (Exception ex)
+        {
+            // Keep whatever is shown; this is only a refresh.
+            Console.WriteLine($"Error refreshing parameter state: {ex.Message}");
+        }
+    }
+
+    public async void RefreshModprobeParameterState()
+    {
+        await RefreshModprobeParameterStateAsync();
     }
 
     private async Task ShowMessagebox(string title, string message)
@@ -142,124 +355,6 @@ public partial class InternalsManager : Window
         catch (Exception ex)
         {
             Console.WriteLine($"Error showing messagebox: {ex.Message}");
-        }
-    }
-
-    private async void ForceEnableAll_OnClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (_mainWindow._client.IsConnected)
-                _mainWindow._client.SendCommandAsync("force_enable_all");
-            Console.WriteLine("Force Enable All Features Command Sent");
-            await Task.Delay(1000);
-            await ShowMessagebox("Forcing All Features",
-                "Initializing Drivers with enable_all parameter. Restarting daemon and refreshing GUI, please wait");
-            ReinitializeDamxGUI();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error in ForceEnableAll: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to force enable all: {ex.Message}");
-        }
-    }
-
-    private async void ForceParameterPermanently_OnSelectionChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        if (_isInitializing) return;
-        // Prevent re-entrancy
-        if (_isProcessingParameterChange) return;
-
-        var comboBox = sender as ComboBox;
-        if (comboBox == null || comboBox.SelectedIndex == -1) return;
-
-        // Check if this is a real change
-        if (comboBox.SelectedIndex == _lastSelectedIndex) return;
-        _lastSelectedIndex = comboBox.SelectedIndex;
-
-        _isProcessingParameterChange = true;
-
-        try
-        {
-            switch (comboBox.SelectedIndex)
-            {
-                case 0:
-                    await SendParameterCommand("remove_modprobe_parameter", "Removing Modprobe Parameter");
-                    break;
-                case 1:
-                    await SendParameterCommand("set_modprobe_parameter_predator", "Setting Predator Parameter");
-                    break;
-                case 2:
-                    await SendParameterCommand("set_modprobe_parameter_nitro", "Setting Nitro Parameter");
-                    break;
-                case 3:
-                    await SendParameterCommand("set_modprobe_parameter_enable_all", "Setting Enable All Parameter");
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error in ForceParameterPermanently_OnSelectionChanged: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to change parameter: {ex.Message}");
-        }
-        finally
-        {
-            _isProcessingParameterChange = false;
-        }
-    }
-
-    private async Task SendParameterCommand(string command, string actionName)
-    {
-        if (!_mainWindow._client.IsConnected)
-        {
-            await ShowMessagebox("Error", "Daemon is not connected");
-            return;
-        }
-
-        try
-        {
-            // Send the command
-            _mainWindow._client.SendCommandAsync(command);
-            Console.WriteLine($"Command '{command}' sent");
-
-            await ShowMessagebox("Success", $"{actionName} command sent successfully");
-
-            // Wait a moment for the command to process
-            await Task.Delay(500);
-
-            // Restart daemon to apply changes
-            if (_mainWindow._client.IsConnected)
-            {
-                _mainWindow._client.SendCommandAsync("restart_drivers_and_daemon");
-                Console.WriteLine("Restart drivers and daemon command sent");
-                await Task.Delay(1000);
-            }
-
-            // Refresh the GUI
-            ReinitializeDamxGUI();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error sending parameter command: {ex.Message}");
-            await ShowMessagebox("Error", $"Failed to {actionName}: {ex.Message}");
-        }
-    }
-
-    // Add this method to help with debugging
-    public async void RefreshModprobeParameterState()
-    {
-        try
-        {
-            if (_mainWindow._client.IsConnected)
-                // You'll need to add a "get_modprobe_parameter" command to your daemon
-                // For now, just log that we're checking
-                Console.WriteLine("Checking modprobe parameter state...");
-            // If you add the command, you can use it like this:
-            // await _mainWindow._client.SendCommandWithResponseAsync("get_modprobe_parameter");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error refreshing parameter state: {ex.Message}");
         }
     }
 }

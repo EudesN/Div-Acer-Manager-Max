@@ -3,185 +3,156 @@
         xmlns:material="using:Material.Icons.Avalonia"
         xmlns:local="using:DivAcerManagerMax"
         x:Class="DivAcerManagerMax.InternalsManager"
-        Width="640" Height="740"
-        Title="DAMX Internals Manager"
+        Width="680" Height="720" MinWidth="560" MinHeight="480"
+        Title="DAMX // Internals"
         Icon="iconTransparent.png"
         WindowStartupLocation="CenterOwner"
-        Background="{StaticResource AppBackgroundBrush}">
+        Background="{StaticResource BgBrush}">
 
     <Window.Styles>
         <Style Selector="TextBlock.Bullet">
-            <Setter Property="Margin" Value="0 3" />
+            <Setter Property="Margin" Value="0 2" />
             <Setter Property="FontSize" Value="12" />
-            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
         </Style>
-        <Style Selector="Border.Card">
+        <Style Selector="local|HudPanel.Card">
             <Setter Property="Margin" Value="0 0 0 16" />
         </Style>
     </Window.Styles>
 
-    <Grid>
-        <ScrollViewer>
-            <StackPanel Margin="28 26 28 20">
-
-                <!-- Header -->
-                <Grid Classes="PageHeader" ColumnDefinitions="*,Auto" Margin="0 0 0 20">
+    <Grid RowDefinitions="Auto,*">
+        <!-- Header strip -->
+        <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource HairlineBrush}" BorderThickness="0 0 0 1">
+            <Panel>
+                <local:Scanlines Fill="{StaticResource ScanlineBrush}" Pitch="3" />
+                <Grid ColumnDefinitions="*,Auto" Margin="24 14">
                     <StackPanel>
-                        <TextBlock Text="INTERNALS" Classes="SectionHeader" FontSize="26" />
-                        <TextBlock Text="&gt; ADVANCED DRIVER AND DAEMON CONTROLS" Classes="Caption" />
+                        <TextBlock Text="INTERNALS" Classes="PageTitle" />
+                        <TextBlock Text="Advanced driver and daemon controls (root actions)" Classes="PageCaption" />
                     </StackPanel>
-                    <StackPanel Grid.Column="1" VerticalAlignment="Bottom" Spacing="6">
-                        <TextBlock Text="ROOT // DEV" Classes="Tag" HorizontalAlignment="Right" />
-                        <local:Stripes Width="110" Height="10" Fill="#66FFC857" />
-                    </StackPanel>
+                    <local:Stripes Grid.Column="1" Width="96" Height="8" VerticalAlignment="Center"
+                                   Fill="{StaticResource DangerBrush}" Opacity="0.5" StripeWidth="2" Gap="4" />
                 </Grid>
+            </Panel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="24 20 24 20">
+
+                <!-- Status line (non-blocking feedback for every action) -->
+                <TextBlock x:Name="InternalsStatusText" Classes="Hint" Margin="0 0 0 16"
+                           Text="Ready." TextWrapping="Wrap" />
 
                 <!-- Developer Mode -->
-                <Border Classes="Card">
-                    <local:HudPanel Classes="Card">
-                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto" Margin="0">
-                            <Border Classes="IconBadge">
-                                <material:MaterialIcon Kind="CodeBraces" />
-                            </Border>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Text="DEVELOPER MODE" Classes="SubHeader" />
-                                <TextBlock Text="// enable advanced controls and feature overrides"
-                                           Classes="Caption" />
-                            </StackPanel>
-                            <ToggleSwitch x:Name="DevModeToggleSwitch" Grid.Column="2"
-                                          VerticalAlignment="Center" OnContent="" OffContent=""
-                                          Click="DevModeSwitch_OnClick" />
-                        </Grid>
-                    </local:HudPanel>
-                </Border>
+                <local:HudPanel Classes="Card">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <material:MaterialIcon Kind="CodeBraces" Width="16" Height="16" Classes="Muted"
+                                               Margin="0 1 10 0" VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="DEVELOPER MODE" Classes="CardTitle" />
+                            <TextBlock Text="Show every control, even for features the daemon did not report"
+                                       Classes="CardCaption" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="DevModeToggleSwitch" Grid.Column="2"
+                                      VerticalAlignment="Center" OnContent="" OffContent=""
+                                      Click="DevModeSwitch_OnClick" />
+                    </Grid>
+                </local:HudPanel>
 
                 <!-- Driver Parameters -->
-                <Border Classes="Card">
-                    <local:HudPanel Classes="Card">
-                        <StackPanel>
-                            <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                <Border Classes="IconBadge">
-                                    <material:MaterialIcon Kind="Chip" />
-                                </Border>
-                                <StackPanel Grid.Column="1">
-                                    <TextBlock Text="DRIVER PARAMETERS" Classes="SubHeader" />
-                                    <TextBlock Text="// load drivers with specific parameters (one-time only)"
-                                               Classes="Caption" />
-                                </StackPanel>
-                            </Grid>
-                            <Border Classes="Rule" />
+                <local:HudPanel Classes="Card">
+                    <StackPanel>
+                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                            <material:MaterialIcon Kind="Chip" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="DRIVER PARAMETERS" Classes="CardTitle" />
+                                <TextBlock Text="Reload linuwu_sense with a parameter (until next reboot)"
+                                           Classes="CardCaption" />
+                            </StackPanel>
+                        </Grid>
 
-                            <WrapPanel ItemSpacing="10" LineSpacing="10">
-                                <Button x:Name="ForceNitroButton"
-                                        Content="LOAD nitro__v4"
-                                        Classes="Secondary"
-                                        Click="ForceNitroButton_OnClick" />
-                                <Button x:Name="ForcePredatorButton"
-                                        Content="LOAD predator__v4"
-                                        Classes="Secondary"
-                                        Click="ForcePredatorButton_OnClick" />
-                                <Button x:Name="ForceEnableAll"
-                                        Content="LOAD enable__all"
-                                        Classes="Secondary"
-                                        Click="ForceEnableAll_OnClick" />
-                            </WrapPanel>
+                        <WrapPanel Orientation="Horizontal">
+                            <Button x:Name="ForceNitroButton" Content="LOAD nitro_v4" Classes="Spaced"
+                                    Click="ForceNitroButton_OnClick" />
+                            <Button x:Name="ForcePredatorButton" Content="LOAD predator_v4" Classes="Spaced"
+                                    Click="ForcePredatorButton_OnClick" />
+                            <Button x:Name="ForceEnableAll" Content="LOAD enable_all" Classes="Spaced"
+                                    Click="ForceEnableAll_OnClick" />
+                        </WrapPanel>
 
-                            <TextBlock Text="&gt; parameters are cleared after restart unless permanent forcing is enabled"
-                                       Classes="Bullet" TextWrapping="Wrap" Margin="0 10 0 0" />
-                        </StackPanel>
-                    </local:HudPanel>
-                </Border>
+                        <TextBlock Classes="Bullet" Margin="0 4 0 0"
+                                   Text="Parameters are cleared after a reboot unless a permanent override is set below." />
+                    </StackPanel>
+                </local:HudPanel>
 
                 <!-- Permanent Model Override -->
-                <Border Classes="Card">
-                    <local:HudPanel Classes="Card">
-                        <StackPanel>
-                            <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                <Border Classes="IconBadge Warning">
-                                    <material:MaterialIcon Kind="Pin" />
-                                </Border>
-                                <StackPanel Grid.Column="1">
-                                    <TextBlock Text="PERMANENT MODEL OVERRIDE" Classes="SubHeader" />
-                                    <TextBlock Classes="Caption"
-                                               Text="// force a specific model for unsupported or problematic devices" />
-                                </StackPanel>
-                            </Grid>
-                            <Border Classes="Rule" />
+                <local:HudPanel Classes="Card">
+                    <StackPanel>
+                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                            <material:MaterialIcon Kind="Pin" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="PERMANENT MODEL OVERRIDE" Classes="CardTitle" />
+                                <TextBlock Classes="CardCaption"
+                                           Text="Force a model for unsupported or problematic devices (/etc/modprobe.d)" />
+                            </StackPanel>
+                        </Grid>
 
-                            <ComboBox x:Name="ForceParameterPermanentlyComboBox"
-                                      SelectedIndex="0"
-                                      SelectionChanged="ForceParameterPermanently_OnSelectionChanged"
-                                      HorizontalAlignment="Left"
-                                      MinWidth="340">
-                                <ComboBoxItem Content="Disabled" />
-                                <ComboBoxItem Content="Force Predator Model (predator_v4)" />
-                                <ComboBoxItem Content="Force Nitro Model (nitro_v4)" />
-                                <ComboBoxItem Content="Force Enable All Features (enable_all)" />
-                            </ComboBox>
-                        </StackPanel>
-                    </local:HudPanel>
-                </Border>
+                        <ComboBox x:Name="ForceParameterPermanentlyComboBox"
+                                  SelectedIndex="0"
+                                  SelectionChanged="ForceParameterPermanently_OnSelectionChanged"
+                                  HorizontalAlignment="Stretch"
+                                  MaxWidth="420">
+                            <ComboBoxItem Content="Disabled" />
+                            <ComboBoxItem Content="Force Predator Model (predator_v4)" />
+                            <ComboBoxItem Content="Force Nitro Model (nitro_v4)" />
+                            <ComboBoxItem Content="Force Enable All Features (enable_all)" />
+                        </ComboBox>
+                        <TextBlock Classes="Bullet" Margin="0 8 0 0"
+                                   Text="The value shown is read back from the daemon after every change." />
+                    </StackPanel>
+                </local:HudPanel>
 
                 <!-- System Restart Controls -->
-                <Border Classes="Card">
-                    <local:HudPanel Classes="Card">
-                        <StackPanel>
-                            <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
-                                <Border Classes="IconBadge">
-                                    <material:MaterialIcon Kind="Restart" />
-                                </Border>
-                                <StackPanel Grid.Column="1">
-                                    <TextBlock Text="SYSTEM RESTART CONTROLS" Classes="SubHeader" />
-                                    <TextBlock Text="// restart system components to apply changes"
-                                               Classes="Caption" />
-                                </StackPanel>
-                            </Grid>
-                            <Border Classes="Rule" />
-
-                            <WrapPanel ItemSpacing="10" LineSpacing="10">
-                                <Button x:Name="RestartSuiteButton"
-                                        Content="RESTART DRIVERS + DAEMON"
-                                        Click="RestartSuiteButton_OnClick" />
-                                <Button x:Name="RestartDaemon"
-                                        Content="RESTART DAEMON ONLY"
-                                        Classes="Secondary"
-                                        Click="RestartDaemon_OnClick" />
-                            </WrapPanel>
-
-                            <StackPanel Margin="0 10 0 0">
-                                <TextBlock Text="&gt; restart both: full reset, clears all parameters"
-                                           Classes="Bullet" />
-                                <TextBlock Text="&gt; restart daemon: updates feature set with current parameters"
-                                           Classes="Bullet" />
+                <local:HudPanel Classes="Card">
+                    <StackPanel>
+                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*">
+                            <material:MaterialIcon Kind="Restart" />
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="RESTART" Classes="CardTitle" />
+                                <TextBlock Text="Restart components to apply changes" Classes="CardCaption" />
                             </StackPanel>
+                        </Grid>
+
+                        <WrapPanel Orientation="Horizontal">
+                            <Button x:Name="RestartSuiteButton" Content="RESTART DRIVERS + DAEMON"
+                                    Classes="Spaced Danger" Click="RestartSuiteButton_OnClick" />
+                            <Button x:Name="RestartDaemon" Content="RESTART DAEMON ONLY" Classes="Spaced"
+                                    Click="RestartDaemon_OnClick" />
+                        </WrapPanel>
+
+                        <StackPanel Margin="0 4 0 0">
+                            <TextBlock Classes="Bullet" Text="Drivers + daemon: full reset, clears runtime parameters." />
+                            <TextBlock Classes="Bullet" Text="Daemon only: re-detects features with the current parameters." />
                         </StackPanel>
-                    </local:HudPanel>
-                </Border>
+                    </StackPanel>
+                </local:HudPanel>
 
                 <!-- Debug Tools -->
-                <Border Classes="Card">
-                    <local:HudPanel Classes="Card">
-                        <Grid Classes="CardHeader" ColumnDefinitions="Auto,*,Auto" Margin="0">
-                            <Border Classes="IconBadge">
-                                <material:MaterialIcon Kind="Bug" />
-                            </Border>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Text="DEBUG TOOLS" Classes="SubHeader" />
-                                <TextBlock Text="// access diagnostic information and logs" Classes="Caption" />
-                            </StackPanel>
-                            <Button x:Name="DaemonLogsButton" Grid.Column="2"
-                                    Content="VIEW LOGS"
-                                    Classes="Secondary"
-                                    VerticalAlignment="Center"
-                                    Click="DaemonLogsButton_OnClick" />
-                        </Grid>
-                    </local:HudPanel>
-                </Border>
-
+                <local:HudPanel Classes="Card">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <material:MaterialIcon Kind="Bug" Width="16" Height="16" Classes="Muted"
+                                               Margin="0 1 10 0" VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="DEBUG" Classes="CardTitle" />
+                            <TextBlock Text="/var/log/DAMX_Daemon_Log.log" Classes="CardCaption" />
+                        </StackPanel>
+                        <Button x:Name="DaemonLogsButton" Grid.Column="2" Content="VIEW LOGS"
+                                VerticalAlignment="Center" Click="DaemonLogsButton_OnClick" />
+                    </Grid>
+                </local:HudPanel>
             </StackPanel>
         </ScrollViewer>
-
-        <local:Scanlines Fill="{StaticResource ScanlineBrush}" Pitch="3" />
     </Grid>
-
 </Window>

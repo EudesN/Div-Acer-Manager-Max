@@ -71,6 +71,25 @@
             <Setter Property="TextTrimming" Value="CharacterEllipsis" />
         </Style>
 
+        <Style Selector="TextBlock.PowerLine">
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource InkSecondaryBrush}" />
+            <Setter Property="Margin" Value="0 4 0 0" />
+        </Style>
+        <!-- Small accent-free outline tag ("BOOST") -->
+        <Style Selector="Border.Tag">
+            <Setter Property="BorderBrush" Value="{StaticResource Ink40Brush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="4 0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Border.Tag > TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="Foreground" Value="{StaticResource InkSecondaryBrush}" />
+        </Style>
+
         <Style Selector="Grid.TitleRow">
             <Setter Property="Margin" Value="0 0 0 8" />
         </Style>
@@ -128,16 +147,28 @@
                     <!-- GPU -->
                     <local:HudPanel Classes="Card" Grid.Column="1" Margin="6 0 6 0">
                         <StackPanel>
-                            <Grid Classes="TitleRow" ColumnDefinitions="Auto,*">
+                            <Grid Classes="TitleRow" ColumnDefinitions="Auto,Auto,*">
                                 <TextBlock x:Name="GpuTitle" Text="GPU" Classes="CardTitle" VerticalAlignment="Center" />
-                                <TextBlock x:Name="GpuModel" Grid.Column="1" Text="{Binding GpuName}" Classes="ModelLine"
+                                <!-- Dynamic Boost active: enforced limit above the default limit -->
+                                <Border Grid.Column="1" Classes="Tag" Margin="8 0 0 0" IsVisible="{Binding IsGpuBoosting}"
+                                        ToolTip.Tip="Dynamic Boost: the GPU power limit is raised above its default">
+                                    <TextBlock Text="BOOST" />
+                                </Border>
+                                <TextBlock x:Name="GpuModel" Grid.Column="2" Text="{Binding GpuName}" Classes="ModelLine"
                                            ToolTip.Tip="{Binding GpuDriverText}" />
                             </Grid>
                             <Grid ColumnDefinitions="Auto,*">
-                                <StackPanel Classes="ReadoutRow">
-                                    <TextBlock x:Name="GpuTemperature" Classes="Readout" Classes.Hot="{Binding IsGpuHot}"
-                                               Text="{Binding GpuTempText}" ToolTip.Tip="{Binding GpuStateText}" />
-                                    <TextBlock Classes="Unit" Text="°C" IsVisible="{Binding !IsGpuAsleep}" />
+                                <StackPanel>
+                                    <StackPanel Classes="ReadoutRow">
+                                        <TextBlock x:Name="GpuTemperature" Classes="Readout" Classes.Hot="{Binding IsGpuHot}"
+                                                   Text="{Binding GpuTempText}" ToolTip.Tip="{Binding GpuStateText}" />
+                                        <TextBlock Classes="Unit" Text="°C" IsVisible="{Binding !IsGpuAsleep}" />
+                                    </StackPanel>
+                                    <!-- Power draw / enforced limit (same nvidia-smi call; "— W" while asleep) -->
+                                    <TextBlock Classes="PowerLine" Text="{Binding GpuPowerText}"
+                                               ToolTip.Tip="GPU power draw / enforced power limit" />
+                                    <local:SegmentBar Maximum="{Binding GpuPowerMax}" Value="{Binding GpuPowerLevel}"
+                                                      Margin="0 4 0 0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Margin="16 0 0 0" Spacing="8">
                                     <Grid Classes="Metric" ColumnDefinitions="*,Auto,Auto" RowDefinitions="Auto,Auto">

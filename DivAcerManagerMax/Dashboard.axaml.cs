@@ -169,6 +169,44 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
 
     public bool HasBattery { get => _hasBattery; set => SetProperty(ref _hasBattery, value); }
 
+    // ---- GPU power (v6): "12.4 / 65 W", bar = draw / enforced limit, Boost tag
+    public string GpuPowerText { get => _gpuPowerText; set => SetProperty(ref _gpuPowerText, value); }
+    public double GpuPowerLevel { get => _gpuPowerLevel; set => SetProperty(ref _gpuPowerLevel, value); }
+    public double GpuPowerMax { get => _gpuPowerMax; set => SetProperty(ref _gpuPowerMax, value); }
+    public bool IsGpuBoosting { get => _isGpuBoosting; set => SetProperty(ref _isGpuBoosting, value); }
+
+    private string _gpuPowerText = Dash + " W";
+    private double _gpuPowerLevel;
+    private double _gpuPowerMax = 100;
+    private bool _isGpuBoosting;
+    private double? _defaultLimitW;
+    private double? _maxLimitW;
+    private double _nvPowerDraw = double.NaN;
+    private double _nvPowerLimit = double.NaN;
+
+    /// <summary>Static limits from the daemon (get_gpu_power_info), used for the bar scale and Boost tag.</summary>
+    public void SetGpuPowerLimits(double? defaultLimitW, double? maxLimitW)
+    {
+        _defaultLimitW = defaultLimitW;
+        _maxLimitW = maxLimitW;
+    }
+
+    private void ApplyGpuPower(double draw, double limit)
+    {
+        var hasDraw = !double.IsNaN(draw) && draw >= 0;
+        var hasLimit = !double.IsNaN(limit) && limit > 0;
+        var scale = hasLimit ? limit : _maxLimitW ?? _defaultLimitW ?? 100;
+
+        GpuPowerMax = scale > 0 ? scale : 100;
+        GpuPowerLevel = hasDraw ? draw : 0;
+        GpuPowerText = !hasDraw
+            ? Dash + " W"
+            : hasLimit
+                ? $"{draw.ToString("0.0", Inv)} / {limit.ToString("0", Inv)} W"
+                : $"{draw.ToString("0.0", Inv)} W";
+        IsGpuBoosting = hasLimit && _defaultLimitW.HasValue && limit > _defaultLimitW.Value + 0.5;
+    }
+
     // INotifyPropertyChanged implementation (hides AvaloniaObject.PropertyChanged on purpose,
     // the compiled bindings in Dashboard.axaml use it).
     public new event PropertyChangedEventHandler? PropertyChanged;
@@ -312,7 +350,11 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         data.CpuFanSpeedRPM = fans.cpuFan;
         data.GpuFanSpeedRPM = fans.gpuFan;
 
+        _nvPowerDraw = double.NaN;
+        _nvPowerLimit = double.NaN;
         var gpu = GetGpuMetrics();
+        data.GpuPowerDraw = _nvPowerDraw;
+        data.GpuPowerLimit = _nvPowerLimit;
         data.GpuTemp = gpu.temperature;
         data.GpuUsage = gpu.usage;
         data.GpuAsleep = gpu.asleep;
@@ -350,6 +392,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 GpuUsage = 0;
                 IsGpuHot = false;
                 GpuStateText = "dGPU asleep — not polled to save power";
+                ApplyGpuPower(double.NaN, double.NaN);
             }
             else
             {
@@ -361,6 +404,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 GpuUsageText = double.IsNaN(m.GpuUsage) ? Dash : FormatNumber(m.GpuUsage);
                 GpuStateText = "Core temperature";
                 if (validTemp) _lastGpuTemp = m.GpuTemp;
+                ApplyGpuPower(m.GpuPowerDraw, m.GpuPowerLimit);
             }
 
             if (_hasBatteryInternal)
@@ -1026,19 +1070,22 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         if (IsNvidiaSuspended())
             return (double.NaN, double.NaN, true);
 
+        // ONE invocation for everything (contract v2): temperature, utilization, power draw and the
+        // enforced limit (Dynamic Boost moves it between default and max). "[N/A]" -> NaN.
         var output = RunCommand("nvidia-smi",
-            "--query-gpu=temperature.gpu,utilization.gpu --format=csv,noheader,nounits");
+            "--query-gpu=temperature.gpu,utilization.gpu,power.draw,enforced.power.limit --format=csv,noheader,nounits");
         var line = FirstNonEmptyLine(output);
         if (line == null) return (double.NaN, double.NaN, false);
 
         var parts = line.Split(',', StringSplitOptions.TrimEntries);
-        var temp = parts.Length > 0 && double.TryParse(parts[0], NumberStyles.Float, Inv, out var t)
-            ? t
-            : double.NaN;
-        var usage = parts.Length > 1 && double.TryParse(parts[1], NumberStyles.Float, Inv, out var u)
-            ? u
-            : double.NaN;
-        return (temp, usage, false);
+        double Field(int i)
+        {
+            return parts.Length > i && double.TryParse(parts[i], NumberStyles.Float, Inv, out var v) ? v : double.NaN;
+        }
+
+        _nvPowerDraw = Field(2);
+        _nvPowerLimit = Field(3);
+        return (Field(0), Field(1), false);
     }
 
     private (double temperature, double usage, bool asleep) GetAmdGpuMetrics()
@@ -1468,6 +1515,8 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         public double GpuTemp { get; set; } = double.NaN;
         public double GpuUsage { get; set; } = double.NaN;
         public bool GpuAsleep { get; set; }
+        public double GpuPowerDraw { get; set; } = double.NaN;
+        public double GpuPowerLimit { get; set; } = double.NaN;
         public int BatteryPercentage { get; set; }
         public string BatteryStatus { get; set; } = "Unknown";
         public double BatteryTimeRemainingHours { get; set; } = double.NaN;

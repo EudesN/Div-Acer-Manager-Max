@@ -76,6 +76,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private readonly DispatcherTimer _toastTimer;
     private readonly DispatcherTimer _curveSummaryTimer;
+    private readonly DispatcherTimer _profilePollTimer;
+
+    // v6: GPU power + ppd sync
+    private PpdSyncInfo? _ppdInfo;
+    private readonly Dictionary<string, ComboBox> _ppdToSystemCombos = new(StringComparer.OrdinalIgnoreCase);
+    private bool _profilePollInFlight;
 
     // v5: fan curve + persistence
     private RadioButton? _curveFanSpeedRadioButton;
@@ -177,6 +183,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 await RefreshCurveSummaryAsync();
         };
 
+        // Follows thermal-profile changes made outside DAMX (e.g. the desktop power menu via ppd sync).
+        _profilePollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _profilePollTimer.Tick += async (_, _) => await PollThermalProfileAsync();
+
         Loaded += MainWindow_Loaded;
     }
 
@@ -203,6 +213,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SetText(_modelNameText, _modelName);
             UpdateProfileButtons();
             _curveSummaryTimer.Start();
+            _profilePollTimer.Start();
         }
         catch (Exception ex)
         {
@@ -217,6 +228,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         base.OnClosed(e);
         _toastTimer.Stop();
         _curveSummaryTimer.Stop();
+        _profilePollTimer.Stop();
         _powerDetection?.Dispose();
         _powerDetection = null;
         _client.Dispose();
@@ -528,6 +540,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         ApplySettingsToUI();
         await RefreshPersistenceAsync();
+        await RefreshGpuPowerAsync();
+        await RefreshPpdSyncAsync();
         if (_currentFanMode == "curve") await RefreshCurveSummaryAsync();
     }
 
@@ -538,6 +552,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _settings = await _client.GetAllSettingsAsync();
             ApplySettingsToUI();
             await RefreshPersistenceAsync();
+            await RefreshPpdSyncAsync();
         }
         catch (Exception ex)
         {
@@ -1380,6 +1395,297 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ShowStatus("Saved AC / battery settings cleared (fan curve kept)", false);
         }, "Reset saved settings");
         await RefreshPersistenceAsync();
+    }
+
+    // ------------------------------------------------------------------ external profile changes (v6)
+
+    private async Task PollThermalProfileAsync()
+    {
+        if (_profilePollInFlight || _profileChangeInFlight || _applyingSettings || !_isConnected || _settings == null ||
+            !IsVisible || WindowState == WindowState.Minimized || !_client.IsFeatureAvailable("thermal_profile"))
+            return;
+
+        _profilePollInFlight = true;
+        try
+        {
+            var (current, available) = await _client.GetThermalProfileAsync();
+            if (_profileChangeInFlight || _settings == null || string.IsNullOrEmpty(current)) return;
+
+            var tp = _settings.ThermalProfile;
+            if (tp == null) return;
+            var availableChanged = available.Count > 0 &&
+                                   !available.SequenceEqual(tp.Available ?? new List<string>(),
+                                       StringComparer.OrdinalIgnoreCase);
+            if (string.Equals(current, _currentProfile, StringComparison.OrdinalIgnoreCase) && !availableChanged)
+                return;
+
+            tp.Current = current;
+            if (available.Count > 0) tp.Available = available;
+            _applyingSettings = true;
+            try
+            {
+                UpdateProfileButtons();
+            }
+            finally
+            {
+                _applyingSettings = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Profile poll: {ex.Message}");
+            RefreshDaemonStatusChip();
+        }
+        finally
+        {
+            _profilePollInFlight = false;
+        }
+    }
+
+    // ------------------------------------------------------------------ GPU power (v6)
+
+    private async Task RefreshGpuPowerAsync()
+    {
+        var panel = FindInScopes<Control>("GpuPowerPanel");
+        try
+        {
+            var info = await _client.GetGpuPowerInfoAsync();
+            _dashboard?.SetGpuPowerLimits(info.DefaultLimitW, info.MaxLimitW);
+            ApplyGpuPowerInfo(info);
+            SetVisible(panel, info.NvidiaPresent);
+        }
+        catch (DaemonCommandException ex)
+        {
+            // Older daemon: no card; limits may still come from get_all_settings.
+            Console.WriteLine($"get_gpu_power_info: {ex.Message}");
+            SetVisible(panel, false);
+            if (_settings?.GpuPower != null)
+                _dashboard?.SetGpuPowerLimits(_settings.GpuPower.DefaultLimitW, _settings.GpuPower.MaxLimitW);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"get_gpu_power_info failed: {ex.Message}");
+        }
+    }
+
+    private void ApplyGpuPowerInfo(GpuPowerInfo info)
+    {
+        SetText(FindInScopes<TextBlock>("NvidiaPowerdStatusText"),
+            !info.PowerdInstalled ? "Not installed"
+            : info.PowerdActive ? (info.PowerdEnabled ? "Active" : "Active (not enabled at boot)")
+            : info.PowerdEnabled ? "Inactive (enabled at boot)" : "Inactive");
+
+        var toggle = FindInScopes<ToggleSwitch>("NvidiaPowerdToggle");
+        if (toggle != null)
+        {
+            toggle.IsChecked = info.PowerdActive;
+            toggle.IsEnabled = info.PowerdInstalled;
+        }
+
+        string limits;
+        if (info.DefaultLimitW is { } def && info.MaxLimitW is { } max)
+            limits = max > def + 0.5
+                ? $"{def.ToString("0", Inv)} W base · up to {max.ToString("0", Inv)} W with Dynamic Boost"
+                : $"{def.ToString("0", Inv)} W limit · no Dynamic Boost headroom";
+        else
+            limits = "Power limits not known yet (read once while the GPU is awake).";
+        SetText(FindInScopes<TextBlock>("GpuPowerLimitsText"), limits);
+    }
+
+    private async void NvidiaPowerdToggle_OnClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleSwitch toggle) return;
+        var enabled = toggle.IsChecked == true;
+        var ok = await RunSafe(async () =>
+        {
+            EnsureSuccess(await _client.SetNvidiaPowerdAsync(enabled), "nvidia-powerd");
+            ShowStatus(enabled ? "nvidia-powerd enabled" : "nvidia-powerd disabled", false);
+        }, "nvidia-powerd");
+        if (!ok) toggle.IsChecked = !enabled;
+        await RefreshGpuPowerAsync();
+    }
+
+    // ------------------------------------------------------------------ ppd sync (v6)
+
+    private static readonly string[] FallbackAcerProfiles =
+        { "low-power", "quiet", "balanced", "balanced-performance", "performance" };
+
+    private static string PpdLabel(string? ppd)
+    {
+        return ppd switch
+        {
+            "power-saver" => "Power saver",
+            "balanced" => "Balanced",
+            "performance" => "Performance",
+            null or "" => "—",
+            _ => TitleCase(ppd)
+        };
+    }
+
+    private List<string> AcerChoices()
+    {
+        var available = _settings?.ThermalProfile?.Available;
+        return available is { Count: > 0 } ? available.ToList() : FallbackAcerProfiles.ToList();
+    }
+
+    /// <summary>Fills a ComboBox with display labels; the keys are kept in Tag.</summary>
+    private static void FillCombo(ComboBox? combo, List<string> keys, Func<string, string> label, string? selected)
+    {
+        if (combo == null) return;
+        var list = new List<string>(keys);
+        if (!string.IsNullOrEmpty(selected) && !list.Contains(selected, StringComparer.OrdinalIgnoreCase))
+            list.Add(selected); // keep the saved value visible even if not offered here
+        combo.ItemsSource = list
+            .Select(k => keys.Contains(k, StringComparer.OrdinalIgnoreCase) ? label(k) : label(k) + " (n/a)")
+            .ToList();
+        combo.Tag = list;
+        combo.SelectedIndex = Math.Max(0, list.FindIndex(k => string.Equals(k, selected, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static string? ComboKey(ComboBox? combo)
+    {
+        return combo?.Tag is List<string> keys && combo.SelectedIndex >= 0 && combo.SelectedIndex < keys.Count
+            ? keys[combo.SelectedIndex]
+            : null;
+    }
+
+    private async Task RefreshPpdSyncAsync()
+    {
+        var panel = FindInScopes<Control>("PpdSyncPanel");
+        try
+        {
+            var info = await _client.GetPpdSyncAsync();
+            RenderPpdSync(info);
+            SetVisible(panel, true);
+        }
+        catch (DaemonCommandException ex)
+        {
+            Console.WriteLine($"get_ppd_sync: {ex.Message}");
+            SetVisible(panel, false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"get_ppd_sync failed: {ex.Message}");
+        }
+    }
+
+    private void RenderPpdSync(PpdSyncInfo info)
+    {
+        _ppdInfo = info;
+
+        SetText(FindInScopes<TextBlock>("PpdStatusText"), info.Available
+            ? $"System profile: {PpdLabel(info.ActiveProfile)} · " +
+              (info.Enabled ? "kept in sync with the Acer thermal profile" : "sync off")
+            : "power-profiles-daemon not detected");
+
+        var toggle = FindInScopes<ToggleSwitch>("PpdSyncToggle");
+        if (toggle != null)
+        {
+            toggle.IsChecked = info.Enabled;
+            toggle.IsEnabled = info.Available;
+        }
+
+        SetEnabled(FindInScopes<Control>("PpdMappingGrid"), info.Available);
+        SetEnabled(FindInScopes<Button>("PpdSaveButton"), info.Available);
+        SetEnabled(FindInScopes<Button>("PpdDefaultsButton"), info.Available);
+
+        // System -> Acer
+        var acer = AcerChoices();
+        string AcerLabel(string k) => GetProfileInfo(k).Label;
+        string? Mapped(string source, string ppd) =>
+            info.ToAcer.TryGetValue(source, out var m) && m.TryGetValue(ppd, out var v) ? v : null;
+
+        FillCombo(FindInScopes<ComboBox>("PpdAcPowerSaverCombo"), acer, AcerLabel, Mapped("ac", "power-saver"));
+        FillCombo(FindInScopes<ComboBox>("PpdAcBalancedCombo"), acer, AcerLabel, Mapped("ac", "balanced"));
+        FillCombo(FindInScopes<ComboBox>("PpdAcPerformanceCombo"), acer, AcerLabel, Mapped("ac", "performance"));
+        FillCombo(FindInScopes<ComboBox>("PpdBatPowerSaverCombo"), acer, AcerLabel, Mapped("battery", "power-saver"));
+        FillCombo(FindInScopes<ComboBox>("PpdBatBalancedCombo"), acer, AcerLabel, Mapped("battery", "balanced"));
+        FillCombo(FindInScopes<ComboBox>("PpdBatPerformanceCombo"), acer, AcerLabel, Mapped("battery", "performance"));
+
+        // Acer -> System: one row per Acer profile offered by the firmware
+        var panel = FindInScopes<StackPanel>("PpdToSystemPanel");
+        if (panel == null) return;
+        panel.Children.Clear();
+        _ppdToSystemCombos.Clear();
+        var ppdKeys = PpdSyncInfo.PpdProfiles.ToList();
+        foreach (var profile in acer)
+        {
+            var row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition(96, GridUnitType.Pixel));
+            row.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
+
+            var label = new TextBlock { Text = AcerLabel(profile), VerticalAlignment = VerticalAlignment.Center };
+            label.Classes.Add("Label");
+            var combo = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+            FillCombo(combo, ppdKeys, PpdLabel, info.ToPpd.TryGetValue(profile, out var p) ? p : "balanced");
+            Grid.SetColumn(combo, 1);
+
+            row.Children.Add(label);
+            row.Children.Add(combo);
+            panel.Children.Add(row);
+            _ppdToSystemCombos[profile] = combo;
+        }
+    }
+
+    private async void PpdSyncToggle_OnClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleSwitch toggle) return;
+        var enabled = toggle.IsChecked == true;
+        var ok = await RunSafe(async () =>
+        {
+            var result = await _client.SetPpdSyncAsync(enabled);
+            EnsureSuccess(result, "Power menu sync");
+            RenderPpdSync(PpdSyncInfo.FromJson(result.Data));
+            ShowStatus(enabled ? "System power menu sync on" : "System power menu sync off", false);
+        }, "Power menu sync");
+        if (!ok) toggle.IsChecked = !enabled;
+    }
+
+    private async void PpdSaveButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        var current = _ppdInfo ?? new PpdSyncInfo();
+
+        var toAcer = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in new[] { "ac", "battery" })
+            toAcer[source] = current.ToAcer.TryGetValue(source, out var m)
+                ? new Dictionary<string, string>(m, StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        void Take(string source, string ppd, string comboName)
+        {
+            if (ComboKey(FindInScopes<ComboBox>(comboName)) is { } key) toAcer[source][ppd] = key;
+        }
+
+        Take("ac", "power-saver", "PpdAcPowerSaverCombo");
+        Take("ac", "balanced", "PpdAcBalancedCombo");
+        Take("ac", "performance", "PpdAcPerformanceCombo");
+        Take("battery", "power-saver", "PpdBatPowerSaverCombo");
+        Take("battery", "balanced", "PpdBatBalancedCombo");
+        Take("battery", "performance", "PpdBatPerformanceCombo");
+
+        var toPpd = new Dictionary<string, string>(current.ToPpd, StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in _ppdToSystemCombos)
+            if (ComboKey(kv.Value) is { } ppd)
+                toPpd[kv.Key] = ppd;
+
+        await RunSafe(async () =>
+        {
+            var result = await _client.SetPpdSyncAsync(null, toAcer, toPpd);
+            EnsureSuccess(result, "Save power menu mapping");
+            RenderPpdSync(PpdSyncInfo.FromJson(result.Data));
+            ShowStatus("Power menu mapping saved", false);
+        }, "Power menu mapping");
+    }
+
+    private async void PpdDefaultsButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        await RunSafe(async () =>
+        {
+            var result = await _client.SetPpdSyncAsync(null, PpdSyncInfo.DefaultToAcer(), PpdSyncInfo.DefaultToPpd());
+            EnsureSuccess(result, "Restore default mapping");
+            RenderPpdSync(PpdSyncInfo.FromJson(result.Data));
+            ShowStatus("Default power menu mapping restored", false);
+        }, "Power menu mapping");
     }
 
     // ------------------------------------------------------------------ battery

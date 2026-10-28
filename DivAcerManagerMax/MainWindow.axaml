@@ -447,6 +447,84 @@
                                 </local:HudPanel>
                             </Grid>
 
+                            <!-- GPU power: nvidia-powerd / Dynamic Boost (get_gpu_power_info, set_nvidia_powerd) -->
+                            <local:HudPanel x:Name="GpuPowerPanel" Classes="Card" Margin="0 0 0 16" IsVisible="False">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="*,Auto">
+                                        <StackPanel>
+                                            <TextBlock Text="GPU POWER" Classes="CardTitle" />
+                                            <TextBlock x:Name="GpuPowerLimitsText" Classes="CardCaption"
+                                                       Text="Power limits not known yet (read once while the GPU is awake)." />
+                                        </StackPanel>
+                                        <ToggleSwitch x:Name="NvidiaPowerdToggle" Grid.Column="1" Margin="16 0 0 0"
+                                                      VerticalAlignment="Top" OnContent="On" OffContent="Off"
+                                                      Click="NvidiaPowerdToggle_OnClick" />
+                                    </Grid>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="nvidia-powerd" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="NvidiaPowerdStatusText" Grid.Column="2" Classes="Value" Text="—" />
+                                    </Grid>
+                                    <TextBlock Classes="Hint" Margin="0 8 0 0"
+                                               Text="Dynamic Boost moves up to the difference between the max and default limits from the CPU to the GPU when the CPU has headroom. It requires the nvidia-powerd service; changing it needs root or the damx group." />
+                                </StackPanel>
+                            </local:HudPanel>
+
+                            <!-- System power menu (power-profiles-daemon) sync (get/set_ppd_sync) -->
+                            <local:HudPanel x:Name="PpdSyncPanel" Classes="Card" Margin="0 0 0 16" IsVisible="False">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="*,Auto">
+                                        <StackPanel>
+                                            <TextBlock Text="SYSTEM POWER MENU SYNC" Classes="CardTitle" />
+                                            <TextBlock x:Name="PpdStatusText" Classes="CardCaption"
+                                                       Text="power-profiles-daemon not detected" />
+                                        </StackPanel>
+                                        <ToggleSwitch x:Name="PpdSyncToggle" Grid.Column="1" Margin="16 0 0 0"
+                                                      VerticalAlignment="Top" OnContent="On" OffContent="Off"
+                                                      Click="PpdSyncToggle_OnClick" />
+                                    </Grid>
+
+                                    <Grid x:Name="PpdMappingGrid" ColumnDefinitions="*,24,*">
+                                        <!-- System -> Acer, per power source -->
+                                        <StackPanel Grid.Column="0" Spacing="6">
+                                            <TextBlock Text="System → Acer" Classes="Label" />
+                                            <Grid ColumnDefinitions="96,*,8,*">
+                                                <TextBlock Grid.Column="1" Text="AC" Classes="Hint" />
+                                                <TextBlock Grid.Column="3" Text="Battery" Classes="Hint" />
+                                            </Grid>
+                                            <Grid ColumnDefinitions="96,*,8,*">
+                                                <TextBlock Text="Power saver" Classes="Label" />
+                                                <ComboBox x:Name="PpdAcPowerSaverCombo" Grid.Column="1" HorizontalAlignment="Stretch" />
+                                                <ComboBox x:Name="PpdBatPowerSaverCombo" Grid.Column="3" HorizontalAlignment="Stretch" />
+                                            </Grid>
+                                            <Grid ColumnDefinitions="96,*,8,*">
+                                                <TextBlock Text="Balanced" Classes="Label" />
+                                                <ComboBox x:Name="PpdAcBalancedCombo" Grid.Column="1" HorizontalAlignment="Stretch" />
+                                                <ComboBox x:Name="PpdBatBalancedCombo" Grid.Column="3" HorizontalAlignment="Stretch" />
+                                            </Grid>
+                                            <Grid ColumnDefinitions="96,*,8,*">
+                                                <TextBlock Text="Performance" Classes="Label" />
+                                                <ComboBox x:Name="PpdAcPerformanceCombo" Grid.Column="1" HorizontalAlignment="Stretch" />
+                                                <ComboBox x:Name="PpdBatPerformanceCombo" Grid.Column="3" HorizontalAlignment="Stretch" />
+                                            </Grid>
+                                        </StackPanel>
+
+                                        <!-- Acer -> System: one row per available Acer profile (built in code) -->
+                                        <StackPanel Grid.Column="2" Spacing="6">
+                                            <TextBlock Text="Acer → System" Classes="Label" />
+                                            <StackPanel x:Name="PpdToSystemPanel" Spacing="6" />
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0 16 0 0">
+                                        <Button x:Name="PpdSaveButton" Content="SAVE MAPPING" Classes="Primary"
+                                                Click="PpdSaveButton_OnClick" />
+                                        <Button x:Name="PpdDefaultsButton" Content="RESTORE DEFAULTS"
+                                                Click="PpdDefaultsButton_OnClick" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </local:HudPanel>
+
                             <!-- Restore settings on startup (get/set/reset_persistence) -->
                             <local:HudPanel x:Name="PersistencePanel" Classes="Card" Margin="0 0 0 16" IsVisible="False">
                                 <StackPanel>

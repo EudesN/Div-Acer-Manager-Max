@@ -616,6 +616,57 @@ public class DAMXClient : IDisposable
         return SendCommandResultAsync("reset_persistence");
     }
 
+    // ------------------------------------------------------------------ GPU power / ppd sync (v6)
+
+    public async Task<GpuPowerInfo> GetGpuPowerInfoAsync()
+    {
+        var result = await SendCommandResultAsync("get_gpu_power_info");
+        if (!result.Success)
+            throw new DaemonCommandException(result.Error ?? "get_gpu_power_info failed", result.IsPermissionDenied);
+        return GpuPowerInfo.FromJson(result.Data);
+    }
+
+    /// <summary>Privileged: enables/disables nvidia-powerd.service (data: {"powerd": {...}}).</summary>
+    public Task<DaemonResult> SetNvidiaPowerdAsync(bool enabled)
+    {
+        return SendCommandResultAsync("set_nvidia_powerd", new Dictionary<string, object> { { "enabled", enabled } });
+    }
+
+    public async Task<PpdSyncInfo> GetPpdSyncAsync()
+    {
+        var result = await SendCommandResultAsync("get_ppd_sync");
+        if (!result.Success)
+            throw new DaemonCommandException(result.Error ?? "get_ppd_sync failed", result.IsPermissionDenied);
+        return PpdSyncInfo.FromJson(result.Data);
+    }
+
+    /// <summary>Partial update: only the non-null parts are sent. Result data has the get_ppd_sync shape.</summary>
+    public Task<DaemonResult> SetPpdSyncAsync(bool? enabled,
+        Dictionary<string, Dictionary<string, string>>? toAcer = null, Dictionary<string, string>? toPpd = null)
+    {
+        var parameters = new Dictionary<string, object>();
+        if (enabled.HasValue) parameters["enabled"] = enabled.Value;
+        if (toAcer != null) parameters["to_acer"] = toAcer;
+        if (toPpd != null) parameters["to_ppd"] = toPpd;
+        return SendCommandResultAsync("set_ppd_sync", parameters);
+    }
+
+    /// <summary>get_thermal_profile: (current, available). Cheap; used to follow profile changes made elsewhere.</summary>
+    public async Task<(string current, List<string> available)> GetThermalProfileAsync()
+    {
+        var result = await SendCommandResultAsync("get_thermal_profile");
+        if (!result.Success)
+            throw new DaemonCommandException(result.Error ?? "get_thermal_profile failed", result.IsPermissionDenied);
+        var current = result.GetDataString("current") ?? "";
+        var available = new List<string>();
+        if (result.Data.ValueKind == JsonValueKind.Object && result.Data.TryGetProperty("available", out var a) &&
+            a.ValueKind == JsonValueKind.Array)
+            foreach (var item in a.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String && item.GetString() is { } name)
+                    available.Add(name);
+        return (current.Trim(), available);
+    }
+
     protected virtual void Dispose(bool disposing)
     {
         if (_disposed) return;
@@ -732,6 +783,27 @@ public class DAMXSettings
     [JsonPropertyName("power_source")]
     [JsonConverter(typeof(FlexibleStringConverter))]
     public string PowerSource { get; set; } = "";
+
+    [JsonPropertyName("ppd_sync")] public PpdSyncSummary? PpdSync { get; set; }
+
+    [JsonPropertyName("gpu_power")] public GpuPowerSummary? GpuPower { get; set; }
+}
+
+public class PpdSyncSummary
+{
+    [JsonPropertyName("available")] public bool? Available { get; set; }
+    [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
+
+    [JsonPropertyName("active_profile")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string? ActiveProfile { get; set; }
+}
+
+public class GpuPowerSummary
+{
+    [JsonPropertyName("powerd_active")] public bool? PowerdActive { get; set; }
+    [JsonPropertyName("default_limit_w")] public double? DefaultLimitW { get; set; }
+    [JsonPropertyName("max_limit_w")] public double? MaxLimitW { get; set; }
 }
 
 public class ThermalProfileSettings
@@ -1018,6 +1090,142 @@ public sealed class PersistenceInfo
                 : "",
             Ac = SavedSourceState.FromJson(state, "ac"),
             Battery = SavedSourceState.FromJson(state, "battery")
+        };
+    }
+}
+
+internal static class JsonRead
+{
+    public static bool Bool(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+    }
+
+    public static bool? NullableBool(JsonElement e, string name)
+    {
+        if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(name, out var v)) return null;
+        return v.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null };
+    }
+
+    public static string? Str(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
+               v.ValueKind == JsonValueKind.String
+            ? v.GetString()
+            : null;
+    }
+
+    public static JsonElement Obj(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
+               v.ValueKind == JsonValueKind.Object
+            ? v
+            : default;
+    }
+
+    public static Dictionary<string, string> StringMap(JsonElement e)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (e.ValueKind != JsonValueKind.Object) return map;
+        foreach (var p in e.EnumerateObject())
+            if (p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() is { } v)
+                map[p.Name] = v;
+        return map;
+    }
+}
+
+/// <summary>get_gpu_power_info (feature-contract-2.md §A).</summary>
+public sealed class GpuPowerInfo
+{
+    public bool NvidiaPresent { get; init; }
+    public bool GpuAsleep { get; init; }
+    public bool PowerdInstalled { get; init; }
+    public bool PowerdEnabled { get; init; }
+    public bool PowerdActive { get; init; }
+    public double? DefaultLimitW { get; init; }
+    public double? MaxLimitW { get; init; }
+    public bool? DynamicBoostSupported { get; init; }
+
+    public static GpuPowerInfo FromJson(JsonElement data)
+    {
+        var powerd = JsonRead.Obj(data, "powerd");
+        return new GpuPowerInfo
+        {
+            NvidiaPresent = JsonRead.Bool(data, "nvidia_present"),
+            GpuAsleep = JsonRead.Bool(data, "gpu_asleep"),
+            PowerdInstalled = JsonRead.Bool(powerd, "installed"),
+            PowerdEnabled = JsonRead.Bool(powerd, "enabled"),
+            PowerdActive = JsonRead.Bool(powerd, "active"),
+            DefaultLimitW = FanCurve.ParseDouble(data, "default_limit_w"),
+            MaxLimitW = FanCurve.ParseDouble(data, "max_limit_w"),
+            DynamicBoostSupported = JsonRead.NullableBool(data, "dynamic_boost_supported")
+        };
+    }
+}
+
+/// <summary>get_ppd_sync / set_ppd_sync data (feature-contract-2.md §B).</summary>
+public sealed class PpdSyncInfo
+{
+    public static readonly string[] PpdProfiles = { "power-saver", "balanced", "performance" };
+
+    public bool Available { get; init; }
+    public string? BusName { get; init; }
+    public string? ActiveProfile { get; init; }
+    public bool Enabled { get; init; }
+    public string PowerSource { get; init; } = "";
+
+    /// <summary>to_acer[source][ppd profile] = Acer profile; sources "ac" / "battery".</summary>
+    public Dictionary<string, Dictionary<string, string>> ToAcer { get; init; } = DefaultToAcer();
+
+    /// <summary>to_ppd[Acer profile] = ppd profile.</summary>
+    public Dictionary<string, string> ToPpd { get; init; } = DefaultToPpd();
+
+    public static Dictionary<string, Dictionary<string, string>> DefaultToAcer()
+    {
+        return new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ac"] = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["power-saver"] = "quiet", ["balanced"] = "balanced", ["performance"] = "balanced-performance"
+            },
+            ["battery"] = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["power-saver"] = "low-power", ["balanced"] = "balanced", ["performance"] = "balanced"
+            }
+        };
+    }
+
+    public static Dictionary<string, string> DefaultToPpd()
+    {
+        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["low-power"] = "power-saver", ["quiet"] = "power-saver", ["balanced"] = "balanced",
+            ["balanced-performance"] = "performance", ["performance"] = "performance"
+        };
+    }
+
+    public static PpdSyncInfo FromJson(JsonElement data)
+    {
+        var toAcer = DefaultToAcer();
+        var toAcerJson = JsonRead.Obj(data, "to_acer");
+        foreach (var source in new[] { "ac", "battery" })
+        {
+            var map = JsonRead.StringMap(JsonRead.Obj(toAcerJson, source));
+            foreach (var kv in map) toAcer[source][kv.Key] = kv.Value;
+        }
+
+        var toPpd = DefaultToPpd();
+        foreach (var kv in JsonRead.StringMap(JsonRead.Obj(data, "to_ppd"))) toPpd[kv.Key] = kv.Value;
+
+        return new PpdSyncInfo
+        {
+            Available = JsonRead.Bool(data, "available"),
+            BusName = JsonRead.Str(data, "bus_name"),
+            ActiveProfile = JsonRead.Str(data, "active_profile"),
+            Enabled = JsonRead.Bool(data, "enabled"),
+            PowerSource = JsonRead.Str(data, "power_source") ?? "",
+            ToAcer = toAcer,
+            ToPpd = toPpd
         };
     }
 }

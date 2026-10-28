@@ -225,6 +225,13 @@ class PowerSourceDetector:
                 return  # a saved per-source profile takes precedence
         except Exception:
             log.exception("Restoring saved settings for the power source failed")
+        if not initial:
+            try:
+                follow_ppd = getattr(self.manager, "apply_ppd_for_power_change", None)
+                if callable(follow_ppd) and follow_ppd(state):
+                    return  # no saved profile: followed power-profiles-daemon's profile
+            except Exception:
+                log.exception("Applying the power-profiles-daemon profile failed")
         try:
             self._handle_power_change(state)
         except Exception:

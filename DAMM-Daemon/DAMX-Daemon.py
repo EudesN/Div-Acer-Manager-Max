@@ -30,7 +30,9 @@ from enum import Enum
 from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from FanCurve import CurveEngine, presets as fan_curve_presets, validate_curve
+from GpuPower import GpuPowerInfo
 from Persistence import StateStore
+from PowerProfilesSync import PowerProfilesSync, merge_mapping
 from PowerSourceDetection import PowerSourceDetector, read_external_power
 
 # Constants
@@ -75,6 +77,7 @@ PRIVILEGED_COMMANDS = frozenset({
     "remove_modprobe_parameter",
     "restart_daemon",
     "restart_drivers_and_daemon",
+    "set_nvidia_powerd",
 })
 # Any future command with one of these prefixes is privileged as well.
 PRIVILEGED_PREFIXES = ("force_", "set_modprobe_parameter", "remove_modprobe_parameter", "restart_")
@@ -263,6 +266,8 @@ class DAMXManager:
         self.power_monitor = None
         self.state = StateStore(STATE_PATH)
         self.curve_engine = CurveEngine(self._engine_write)
+        self.ppd_sync = PowerProfilesSync(self)
+        self.gpu_power = GpuPowerInfo(self.state)
         self._startup_restore: Optional[Tuple[str, bool]] = None
 
         log.info(f"** Starting DAMX-Daemon v{VERSION} **")
@@ -827,7 +832,28 @@ class DAMXManager:
             return False
 
         with self.lock:
-            return self._write_file(_platform_profile_path(), profile)
+            ok = self._write_file(_platform_profile_path(), profile)
+        if ok:
+            self._after_profile_change(profile)
+        return ok
+
+    def _after_profile_change(self, profile: str):
+        """Every successful profile change (user, restore, battery logic, ppd) ends here."""
+        try:
+            self.ppd_sync.on_acer_profile(profile)
+        except Exception:
+            log.error(f"ppd sync after profile change failed:\n{traceback.format_exc()}")
+
+    def user_set_thermal_profile(self, profile: str) -> bool:
+        """The user path: set the profile and persist it for the current power source."""
+        if not self.set_thermal_profile(profile):
+            return False
+        self.persist_source(thermal_profile=profile)
+        return True
+
+    def apply_ppd_for_power_change(self, is_ac: bool) -> bool:
+        """No saved profile for the new source: follow ppd's current profile (if synced)."""
+        return self.ppd_sync.apply_for_power_change(is_ac)
 
     def get_thermal_profile_choices(self) -> List[str]:
         """Get available thermal profiles (as advertised by the kernel)"""
@@ -1190,6 +1216,9 @@ class DAMXManager:
         settings["fan_curve_active"] = self.curve_engine.active
         settings["restore_on_start"] = self.state.restore_on_start
         settings["power_source"] = self.power_source()
+        settings["ppd_sync"] = {"available": self.ppd_sync.available, "enabled": self.ppd_sync.enabled,
+                                "active_profile": self.ppd_sync.active_profile if self.ppd_sync.available else None}
+        settings["gpu_power"] = self.gpu_power.summary()
         return settings
 
 
@@ -1288,6 +1317,10 @@ class DaemonServer:
             "get_persistence": self._cmd_get_persistence,
             "set_persistence": self._cmd_set_persistence,
             "reset_persistence": self._cmd_reset_persistence,
+            "get_gpu_power_info": self._cmd_get_gpu_power_info,
+            "set_nvidia_powerd": self._cmd_set_nvidia_powerd,
+            "get_ppd_sync": self._cmd_get_ppd_sync,
+            "set_ppd_sync": self._cmd_set_ppd_sync,
             "force_nitro_model": self._make_force("nitro_v4"),
             "force_predator_model": self._make_force("predator_v4"),
             "force_enable_all": self._make_force("enable_all"),
@@ -1656,8 +1689,7 @@ class DaemonServer:
     def _cmd_set_thermal_profile(self, params, post):
         self._require_feature("thermal_profile", "Thermal profile")
         profile = _str_param(params, "profile")
-        if self.manager.set_thermal_profile(profile):
-            self.manager.persist_source(thermal_profile=profile)
+        if self.manager.user_set_thermal_profile(profile):
             return _ok({"profile": profile})
         return self._failure(f"Failed to set thermal profile {_short(profile)}")
 
@@ -1732,6 +1764,36 @@ class DaemonServer:
     def _cmd_reset_persistence(self, params, post):
         self.manager.state.reset()
         return _ok({"cleared": True})
+
+    def _cmd_get_gpu_power_info(self, params, post):
+        return _ok(self.manager.gpu_power.info())
+
+    def _cmd_set_nvidia_powerd(self, params, post):
+        enabled = _bool_param(params, "enabled")
+        ok, error = self.manager.gpu_power.set_powerd(enabled)
+        if not ok:
+            return _err(error)
+        return _ok({"powerd": self.manager.gpu_power.powerd_status(force=True)})
+
+    def _cmd_get_ppd_sync(self, params, post):
+        sync = self.manager.ppd_sync
+        if sync.ensure_detected():
+            value = sync.read_active()
+            if value is not None:
+                sync.active_profile = value
+        return _ok(sync.status())
+
+    def _cmd_set_ppd_sync(self, params, post):
+        update = {k: params[k] for k in ("enabled", "to_acer", "to_ppd") if k in params}
+        if "enabled" in update and not isinstance(update["enabled"], bool):
+            raise RequestError("parameter 'enabled' must be a boolean (true/false)")
+        try:
+            mapping = merge_mapping(self.manager.state.ppd_sync(), update)
+        except ValueError as e:
+            raise RequestError(str(e))
+        self.manager.state.set_ppd_sync(mapping)
+        self.manager.ppd_sync.ensure_detected()
+        return _ok(self.manager.ppd_sync.status())
 
     def _cmd_set_usb_charging(self, params, post):
         self._require_feature("usb_charging", "USB charging control")
@@ -1923,11 +1985,16 @@ class DAMXDaemon:
         try:
             self.running = True
             try:
+                self.manager.ppd_sync.detect()  # so start-up restore can sync ppd
+            except Exception:
+                log.error(f"ppd detection failed:\n{traceback.format_exc()}")
+            try:
                 self.manager.restore_state("start")
             except Exception:
                 log.error(f"Restoring saved settings failed:\n{traceback.format_exc()}")
             if self.power_monitor:
                 self.power_monitor.start_monitoring()
+            self.manager.ppd_sync.start()
             self.server.serve()
         except Exception as e:
             log.error(f"Error running daemon: {e}")
@@ -1946,6 +2013,10 @@ class DAMXDaemon:
         if self.power_monitor:
             self.power_monitor.stop_monitoring()
         if self.manager:
+            try:
+                self.manager.ppd_sync.stop()  # terminates busctl monitor
+            except Exception:
+                log.error(f"Stopping ppd sync failed:\n{traceback.format_exc()}")
             try:
                 self.manager.shutdown_fans()  # engine active -> "0,0" (firmware auto)
             except Exception:

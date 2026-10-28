@@ -10,6 +10,7 @@ import threading
 from typing import Dict, Optional
 
 from FanCurve import default_curve, validate_curve
+from PowerProfilesSync import default_mapping, validate_mapping
 
 log = logging.getLogger("DAMXDaemon")
 
@@ -34,7 +35,13 @@ def default_state() -> Dict:
         "battery": _empty_source(),
         "curve": default_curve(),
         "settings": _empty_settings(),
+        "ppd_sync": default_mapping(),
+        "gpu_power_limits": {"default_limit_w": None, "max_limit_w": None},
     }
+
+
+def _positive_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 10000
 
 
 def _is_int(v) -> bool:
@@ -73,6 +80,16 @@ def _sanitize(data: Dict) -> Dict:
                 state["settings"][key] = settings[key]
         if _is_int(settings.get("usb_charging")) and settings["usb_charging"] in (0, 10, 20, 30):
             state["settings"]["usb_charging"] = settings["usb_charging"]
+    if "ppd_sync" in data:
+        try:
+            state["ppd_sync"] = validate_mapping(data["ppd_sync"])
+        except ValueError as e:
+            log.warning(f"Saved ppd_sync mapping is invalid ({e}); using defaults")
+    limits = data.get("gpu_power_limits")
+    if isinstance(limits, dict):
+        for key in ("default_limit_w", "max_limit_w"):
+            if _positive_number(limits.get(key)):
+                state["gpu_power_limits"][key] = float(limits[key])
     return state
 
 
@@ -186,6 +203,24 @@ class StateStore:
             self.data["ac"] = _empty_source()
             self.data["battery"] = _empty_source()
             self.data["settings"] = _empty_settings()
+            return self.save()
+
+    def ppd_sync(self) -> Dict:
+        with self._lock:
+            return copy.deepcopy(self.data["ppd_sync"])
+
+    def set_ppd_sync(self, mapping: Dict) -> bool:
+        with self._lock:
+            self.data["ppd_sync"] = copy.deepcopy(mapping)
+            return self.save()
+
+    def gpu_power_limits(self) -> Dict:
+        with self._lock:
+            return copy.deepcopy(self.data["gpu_power_limits"])
+
+    def set_gpu_power_limits(self, default_w: Optional[float], max_w: Optional[float]) -> bool:
+        with self._lock:
+            self.data["gpu_power_limits"] = {"default_limit_w": default_w, "max_limit_w": max_w}
             return self.save()
 
     def manual_value(self, src: str) -> Optional[list]:

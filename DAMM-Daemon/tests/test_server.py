@@ -358,7 +358,7 @@ def test_privileged_command_set(damx):
         "force_nitro_model", "force_predator_model", "force_enable_all",
         "set_modprobe_parameter_predator", "set_modprobe_parameter_nitro",
         "set_modprobe_parameter_enable_all", "remove_modprobe_parameter",
-        "restart_daemon", "restart_drivers_and_daemon"}
+        "restart_daemon", "restart_drivers_and_daemon", "set_nvidia_powerd"}
     for c in ("force_anything", "restart_x", "set_modprobe_parameter_foo"):
         assert damx.is_privileged_command(c)
     for c in ("get_modprobe_parameter", "set_fan_speed", "set_thermal_profile", "ping",
@@ -370,7 +370,7 @@ def test_privileged_command_set(damx):
     "force_nitro_model", "force_predator_model", "force_enable_all",
     "set_modprobe_parameter_predator", "set_modprobe_parameter_nitro",
     "set_modprobe_parameter_enable_all", "remove_modprobe_parameter",
-    "restart_daemon", "restart_drivers_and_daemon"]))
+    "restart_daemon", "restart_drivers_and_daemon", "set_nvidia_powerd"]))
 def test_unprivileged_peer_denied(server, damx, root, fake_sp, monkeypatch, command):
     as_peer(monkeypatch, damx, 1000, groups={"wheel": (10, ["bob"]), "damx": (977, [])})
     Path(root, CONF).write_text("options linuwu_sense nitro_v4=1\n")

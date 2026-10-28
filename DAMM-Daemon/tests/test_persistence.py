@@ -43,6 +43,16 @@ def test_defaults_without_file(root, damx, pers, fc):
         "battery": {"thermal_profile": None, "fan_mode": None, "fan_manual": None},
         "curve": fc.default_curve(),
         "settings": {"battery_limiter": None, "usb_charging": None, "backlight_timeout": None},
+        "ppd_sync": {
+            "enabled": True,
+            "to_acer": {
+                "ac": {"power-saver": "quiet", "balanced": "balanced", "performance": "balanced-performance"},
+                "battery": {"power-saver": "low-power", "balanced": "balanced", "performance": "balanced"},
+            },
+            "to_ppd": {"low-power": "power-saver", "quiet": "power-saver", "balanced": "balanced",
+                       "balanced-performance": "performance", "performance": "performance"},
+        },
+        "gpu_power_limits": {"default_limit_w": None, "max_limit_w": None},
     }
     assert not Path(root, STATE).exists()  # nothing written until something changes
 

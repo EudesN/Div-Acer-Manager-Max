@@ -92,7 +92,9 @@ def fake_time_module():
 
 # Import order matters: the daemon does `from PowerSourceDetection import ...`
 fc_mod = _load("FanCurve", "FanCurve.py")
+pps_mod = _load("PowerProfilesSync", "PowerProfilesSync.py")
 pers_mod = _load("Persistence", "Persistence.py")
+gp_mod = _load("GpuPower", "GpuPower.py")
 psd_mod = _load("PowerSourceDetection", "PowerSourceDetection.py")
 _orig_geteuid = os.geteuid
 os.geteuid = lambda: 0  # module-level root check
@@ -194,12 +196,24 @@ def pers():
 
 
 @pytest.fixture
+def pps():
+    return pps_mod
+
+
+@pytest.fixture
+def gp():
+    return gp_mod
+
+
+@pytest.fixture
 def fake_sp(monkeypatch):
     fs = FakeSubprocess()
     monkeypatch.setattr(daemon_mod, "subprocess", fs)
     monkeypatch.setattr(psd_mod, "subprocess", fs)
     monkeypatch.setattr(kbm_mod, "subprocess", fs)
     monkeypatch.setattr(fc_mod, "subprocess", fs)
+    monkeypatch.setattr(pps_mod, "subprocess", fs)
+    monkeypatch.setattr(gp_mod, "subprocess", fs)
     return fs
 
 

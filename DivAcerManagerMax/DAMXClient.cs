@@ -567,6 +567,55 @@ public class DAMXClient : IDisposable
         });
     }
 
+    // ------------------------------------------------------------------ fan mode / curve / persistence (v5)
+
+    /// <summary>set_fan_mode: "auto" | "max" | "manual" (cpu/gpu 1..100) | "curve".</summary>
+    public Task<DaemonResult> SetFanModeAsync(string mode, int? cpu = null, int? gpu = null)
+    {
+        var parameters = new Dictionary<string, object> { { "mode", mode } };
+        if (cpu.HasValue) parameters["cpu"] = cpu.Value;
+        if (gpu.HasValue) parameters["gpu"] = gpu.Value;
+        return SendCommandResultAsync("set_fan_mode", parameters);
+    }
+
+    /// <summary>get_fan_curve: saved curve, engine state, presets and the last engine sample.</summary>
+    public async Task<FanCurveInfo> GetFanCurveAsync()
+    {
+        var result = await SendCommandResultAsync("get_fan_curve");
+        if (!result.Success)
+            throw new DaemonCommandException(result.Error ?? "get_fan_curve failed", result.IsPermissionDenied);
+        return FanCurveInfo.FromJson(result.Data);
+    }
+
+    /// <summary>set_fan_curve: validates + saves; activate=true also switches fan_mode to "curve".</summary>
+    public Task<DaemonResult> SetFanCurveAsync(FanCurve curve, bool activate)
+    {
+        return SendCommandResultAsync("set_fan_curve", new Dictionary<string, object>
+        {
+            { "curve", curve.ToParams() },
+            { "activate", activate }
+        });
+    }
+
+    public async Task<PersistenceInfo> GetPersistenceAsync()
+    {
+        var result = await SendCommandResultAsync("get_persistence");
+        if (!result.Success)
+            throw new DaemonCommandException(result.Error ?? "get_persistence failed", result.IsPermissionDenied);
+        return PersistenceInfo.FromJson(result.Data);
+    }
+
+    public Task<DaemonResult> SetPersistenceAsync(bool restoreOnStart)
+    {
+        return SendCommandResultAsync("set_persistence",
+            new Dictionary<string, object> { { "restore_on_start", restoreOnStart } });
+    }
+
+    public Task<DaemonResult> ResetPersistenceAsync()
+    {
+        return SendCommandResultAsync("reset_persistence");
+    }
+
     protected virtual void Dispose(bool disposing)
     {
         if (_disposed) return;
@@ -670,6 +719,19 @@ public class DAMXSettings
     [JsonPropertyName("modprobe_parameter")]
     [JsonConverter(typeof(FlexibleStringConverter))]
     public string ModprobeParameter { get; set; } = "";
+
+    /// <summary>"auto" | "max" | "manual" | "curve" | "unknown" (absent on older daemons).</summary>
+    [JsonPropertyName("fan_mode")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string FanMode { get; set; } = "";
+
+    [JsonPropertyName("fan_curve_active")] public bool? FanCurveActive { get; set; }
+
+    [JsonPropertyName("restore_on_start")] public bool? RestoreOnStart { get; set; }
+
+    [JsonPropertyName("power_source")]
+    [JsonConverter(typeof(FlexibleStringConverter))]
+    public string PowerSource { get; set; } = "";
 }
 
 public class ThermalProfileSettings
@@ -690,4 +752,272 @@ public class FanSpeedSettings
     [JsonPropertyName("gpu")]
     [JsonConverter(typeof(FlexibleStringConverter))]
     public string Gpu { get; set; } = "0";
+}
+
+/// <summary>One fan curve: points are [temp °C, percent]; see feature-contract.md.</summary>
+public sealed class FanCurve
+{
+    public const int MinTemp = 20;
+    public const int MaxTemp = 105;
+    public const int SafetyTemp = 95;
+    public const int MinPoints = 2;
+    public const int MaxPoints = 8;
+
+    public List<int[]> Cpu { get; set; } = new();
+    public List<int[]> Gpu { get; set; } = new();
+    public int Hysteresis { get; set; } = 4;
+    public int Interval { get; set; } = 2;
+
+    public static FanCurve Default()
+    {
+        return new FanCurve
+        {
+            Cpu = new List<int[]> { new[] { 40, 20 }, new[] { 60, 40 }, new[] { 75, 65 }, new[] { 88, 100 } },
+            Gpu = new List<int[]> { new[] { 40, 20 }, new[] { 60, 40 }, new[] { 75, 65 }, new[] { 85, 100 } },
+            Hysteresis = 4,
+            Interval = 2
+        };
+    }
+
+    public FanCurve Clone()
+    {
+        return new FanCurve
+        {
+            Cpu = ClonePoints(Cpu),
+            Gpu = ClonePoints(Gpu),
+            Hysteresis = Hysteresis,
+            Interval = Interval
+        };
+    }
+
+    public static List<int[]> ClonePoints(List<int[]> points)
+    {
+        var copy = new List<int[]>(points.Count);
+        foreach (var p in points) copy.Add(new[] { p[0], p[1] });
+        return copy;
+    }
+
+    public List<int[]> Series(bool gpu)
+    {
+        return gpu ? Gpu : Cpu;
+    }
+
+    /// <summary>Linear interpolation, flat outside the points, 100 % at/above the safety temperature.</summary>
+    public static int Evaluate(List<int[]> points, double temp)
+    {
+        if (points.Count == 0) return 0;
+        if (temp >= SafetyTemp) return 100;
+        if (temp <= points[0][0]) return points[0][1];
+        for (var i = 1; i < points.Count; i++)
+            if (temp <= points[i][0])
+            {
+                var (t0, p0, t1, p1) = (points[i - 1][0], points[i - 1][1], points[i][0], points[i][1]);
+                return (int)Math.Round(p0 + (p1 - p0) * (temp - t0) / Math.Max(1, t1 - t0));
+            }
+
+        return points[^1][1];
+    }
+
+    /// <summary>Same rules the daemon enforces. Returns null when valid, otherwise the error text.</summary>
+    public string? Validate()
+    {
+        if (Hysteresis is < 0 or > 10) return "Hysteresis must be 0–10 °C.";
+        if (Interval is < 1 or > 10) return "Interval must be 1–10 s.";
+        return ValidateSeries("CPU", Cpu) ?? ValidateSeries("GPU", Gpu);
+    }
+
+    private static string? ValidateSeries(string name, List<int[]> points)
+    {
+        if (points.Count is < MinPoints or > MaxPoints) return $"{name}: the curve needs 2–8 points.";
+        for (var i = 0; i < points.Count; i++)
+        {
+            var (t, p) = (points[i][0], points[i][1]);
+            if (t is < MinTemp or > MaxTemp) return $"{name}: temperatures must be {MinTemp}–{MaxTemp} °C.";
+            if (p is < 1 or > 100) return $"{name}: fan speed must be 1–100 % (0 means firmware auto).";
+            if (i > 0 && t <= points[i - 1][0]) return $"{name}: temperatures must be strictly increasing.";
+            if (i > 0 && p < points[i - 1][1]) return $"{name}: fan speed must not decrease as temperature rises.";
+        }
+
+        return null;
+    }
+
+    /// <summary>Object serialized as the "curve" parameter.</summary>
+    public Dictionary<string, object> ToParams()
+    {
+        return new Dictionary<string, object>
+        {
+            { "cpu", ClonePoints(Cpu) },
+            { "gpu", ClonePoints(Gpu) },
+            { "hysteresis", Hysteresis },
+            { "interval", Interval }
+        };
+    }
+
+    /// <summary>Lenient parser (accepts 45 or 45.0); returns null if the shape is unusable.</summary>
+    public static FanCurve? FromJson(JsonElement e)
+    {
+        if (e.ValueKind != JsonValueKind.Object) return null;
+        var curve = new FanCurve
+        {
+            Cpu = ParsePoints(e, "cpu"),
+            Gpu = ParsePoints(e, "gpu"),
+            Hysteresis = ParseInt(e, "hysteresis") ?? 4,
+            Interval = ParseInt(e, "interval") ?? 2
+        };
+        return curve.Cpu.Count >= MinPoints && curve.Gpu.Count >= MinPoints ? curve : null;
+    }
+
+    private static List<int[]> ParsePoints(JsonElement e, string name)
+    {
+        var list = new List<int[]>();
+        if (!e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+        foreach (var pt in arr.EnumerateArray())
+        {
+            if (pt.ValueKind != JsonValueKind.Array || pt.GetArrayLength() < 2) continue;
+            var t = pt[0];
+            var p = pt[1];
+            if (t.ValueKind == JsonValueKind.Number && p.ValueKind == JsonValueKind.Number)
+                list.Add(new[] { (int)Math.Round(t.GetDouble()), (int)Math.Round(p.GetDouble()) });
+        }
+
+        return list;
+    }
+
+    internal static int? ParseInt(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
+               v.ValueKind == JsonValueKind.Number
+            ? (int)Math.Round(v.GetDouble())
+            : null;
+    }
+
+    internal static double? ParseDouble(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
+               v.ValueKind == JsonValueKind.Number
+            ? v.GetDouble()
+            : null;
+    }
+}
+
+/// <summary>Last sample of the daemon's curve engine.</summary>
+public sealed class FanCurveSample
+{
+    public double? CpuTemp { get; init; }
+    public double? GpuTemp { get; init; }
+    public int? CpuPercent { get; init; }
+    public int? GpuPercent { get; init; }
+    public bool GpuAsleep { get; init; }
+
+    public static FanCurveSample FromJson(JsonElement e)
+    {
+        return new FanCurveSample
+        {
+            CpuTemp = FanCurve.ParseDouble(e, "cpu_temp"),
+            GpuTemp = FanCurve.ParseDouble(e, "gpu_temp"),
+            CpuPercent = FanCurve.ParseInt(e, "cpu_percent"),
+            GpuPercent = FanCurve.ParseInt(e, "gpu_percent"),
+            GpuAsleep = e.ValueKind == JsonValueKind.Object && e.TryGetProperty("gpu_asleep", out var a) &&
+                        a.ValueKind == JsonValueKind.True
+        };
+    }
+
+    /// <summary>"CPU 62 °C → 45 % · GPU sleep" (culture independent).</summary>
+    public string Summary()
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        string Part(string name, double? temp, int? pct, bool asleep)
+        {
+            if (asleep) return $"{name} sleep" + (pct.HasValue ? $" → {pct.Value.ToString(inv)} %" : "");
+            var t = temp.HasValue ? temp.Value.ToString("0", inv) + " °C" : "— °C";
+            var p = pct.HasValue ? pct.Value.ToString(inv) + " %" : "— %";
+            return $"{name} {t} → {p}";
+        }
+
+        return Part("CPU", CpuTemp, CpuPercent, false) + " · " + Part("GPU", GpuTemp, GpuPercent, GpuAsleep);
+    }
+}
+
+public sealed class FanCurveInfo
+{
+    public FanCurve Curve { get; init; } = FanCurve.Default();
+    public bool Active { get; init; }
+    public Dictionary<string, FanCurve> Presets { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    public FanCurveSample Last { get; init; } = new();
+
+    public static FanCurveInfo FromJson(JsonElement data)
+    {
+        var presets = new Dictionary<string, FanCurve>(StringComparer.OrdinalIgnoreCase);
+        if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("presets", out var pr) &&
+            pr.ValueKind == JsonValueKind.Object)
+            foreach (var prop in pr.EnumerateObject())
+                if (FanCurve.FromJson(prop.Value) is { } c)
+                    presets[prop.Name] = c;
+
+        return new FanCurveInfo
+        {
+            Curve = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("curve", out var cv)
+                ? FanCurve.FromJson(cv) ?? FanCurve.Default()
+                : FanCurve.Default(),
+            Active = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("active", out var a) &&
+                     a.ValueKind == JsonValueKind.True,
+            Presets = presets,
+            Last = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("last", out var l)
+                ? FanCurveSample.FromJson(l)
+                : new FanCurveSample()
+        };
+    }
+}
+
+/// <summary>Saved per-power-source state (get_persistence).</summary>
+public sealed class SavedSourceState
+{
+    public string? ThermalProfile { get; init; }
+    public string? FanMode { get; init; }
+    public int[]? FanManual { get; init; }
+
+    public static SavedSourceState FromJson(JsonElement state, string source)
+    {
+        if (state.ValueKind != JsonValueKind.Object || !state.TryGetProperty(source, out var s) ||
+            s.ValueKind != JsonValueKind.Object)
+            return new SavedSourceState();
+
+        string? Str(string n)
+        {
+            return s.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        }
+
+        int[]? manual = null;
+        if (s.TryGetProperty("fan_manual", out var m) && m.ValueKind == JsonValueKind.Array &&
+            m.GetArrayLength() >= 2 && m[0].ValueKind == JsonValueKind.Number && m[1].ValueKind == JsonValueKind.Number)
+            manual = new[] { (int)Math.Round(m[0].GetDouble()), (int)Math.Round(m[1].GetDouble()) };
+
+        return new SavedSourceState { ThermalProfile = Str("thermal_profile"), FanMode = Str("fan_mode"), FanManual = manual };
+    }
+}
+
+public sealed class PersistenceInfo
+{
+    public bool RestoreOnStart { get; init; }
+    public string PowerSource { get; init; } = "";
+    public SavedSourceState Ac { get; init; } = new();
+    public SavedSourceState Battery { get; init; } = new();
+
+    public static PersistenceInfo FromJson(JsonElement data)
+    {
+        var state = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("state", out var st)
+            ? st
+            : default;
+        return new PersistenceInfo
+        {
+            RestoreOnStart = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("restore_on_start", out var r) &&
+                             r.ValueKind == JsonValueKind.True,
+            PowerSource = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("power_source", out var ps) &&
+                          ps.ValueKind == JsonValueKind.String
+                ? ps.GetString() ?? ""
+                : "",
+            Ac = SavedSourceState.FromJson(state, "ac"),
+            Battery = SavedSourceState.FromJson(state, "battery")
+        };
+    }
 }

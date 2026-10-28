@@ -75,6 +75,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     };
 
     private readonly DispatcherTimer _toastTimer;
+    private readonly DispatcherTimer _curveSummaryTimer;
+
+    // v5: fan curve + persistence
+    private RadioButton? _curveFanSpeedRadioButton;
+    private bool _curveSummaryInFlight;
+    private string _currentFanMode = "auto";
+    private Button? _editFanCurveButton;
+    private TextBlock? _fanCurveSummaryText;
+    private DateTime _resetConfirmUntil = DateTime.MinValue;
 
     // UI Controls (bound via the window's and the dashboard's name scopes)
     private Button? _applyKeyboardColorsButton;
@@ -159,6 +168,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (_statusToast != null) _statusToast.IsVisible = false;
         };
 
+        // Refreshes the one-line curve summary while CURVE is selected (cheap socket call,
+        // the daemon never wakes the dGPU for it).
+        _curveSummaryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        _curveSummaryTimer.Tick += async (_, _) =>
+        {
+            if (_curveFanSpeedRadioButton?.IsChecked == true && _isConnected && IsVisible)
+                await RefreshCurveSummaryAsync();
+        };
+
         Loaded += MainWindow_Loaded;
     }
 
@@ -184,6 +202,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SetText(_headerModelText, _modelName.ToUpperInvariant());
             SetText(_modelNameText, _modelName);
             UpdateProfileButtons();
+            _curveSummaryTimer.Start();
         }
         catch (Exception ex)
         {
@@ -197,6 +216,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         base.OnClosed(e);
         _toastTimer.Stop();
+        _curveSummaryTimer.Stop();
         _powerDetection?.Dispose();
         _powerDetection = null;
         _client.Dispose();
@@ -242,6 +262,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _gpuFanTextBlock = FindInScopes<TextBlock>("GpuFanTextBlock");
         _setManualSpeedButton = FindInScopes<Button>("SetManualSpeedButton");
         _manualDisabledInfoText = FindInScopes<TextBlock>("ManualDisabledInfoText");
+        _curveFanSpeedRadioButton = FindInScopes<RadioButton>("CurveFanSpeedRadioButton");
+        _fanCurveSummaryText = FindInScopes<TextBlock>("FanCurveSummaryText");
+        _editFanCurveButton = FindInScopes<Button>("EditFanCurveButton");
 
         // Battery
         _startCalibrationButton = FindInScopes<Button>("StartCalibrationButton");
@@ -300,6 +323,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (_autoFanSpeedRadioButton != null) _autoFanSpeedRadioButton.Click += AutoFanSpeedRadioButtonClick;
         if (_maxFanSpeedRadioButton != null) _maxFanSpeedRadioButton.Click += MaxFanSpeedRadioButton_OnClick;
         if (_manualFanSpeedRadioButton != null) _manualFanSpeedRadioButton.Click += ManualFanControlRadioBox_Click;
+        if (_curveFanSpeedRadioButton != null) _curveFanSpeedRadioButton.Click += CurveFanSpeedRadioButton_OnClick;
+        if (_editFanCurveButton != null) _editFanCurveButton.Click += EditFanCurveButton_OnClick;
         if (_cpuFanSlider != null) _cpuFanSlider.PropertyChanged += CpuFanSlider_ValueChanged;
         if (_gpuFanSlider != null) _gpuFanSlider.PropertyChanged += GpuFanSlider_ValueChanged;
         if (_setManualSpeedButton != null) _setManualSpeedButton.Click += SetManualSpeedButton_OnClick;
@@ -359,11 +384,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>Like RunSafe; on failure re-reads the daemon state so the UI shows the truth again.</summary>
-    private async Task RunDaemonAction(string context, Func<Task> action, bool resyncOnFailure = true)
+    private async Task<bool> RunDaemonAction(string context, Func<Task> action, bool resyncOnFailure = true)
     {
         var ok = await RunSafe(action, context);
         if (!ok && resyncOnFailure && _client.IsConnected)
             await ReloadSettingsQuietlyAsync();
+        return ok;
     }
 
     private static void EnsureSuccess(DaemonResult result, string what)
@@ -501,6 +527,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         ApplySettingsToUI();
+        await RefreshPersistenceAsync();
+        if (_currentFanMode == "curve") await RefreshCurveSummaryAsync();
     }
 
     private async Task ReloadSettingsQuietlyAsync()
@@ -509,6 +537,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             _settings = await _client.GetAllSettingsAsync();
             ApplySettingsToUI();
+            await RefreshPersistenceAsync();
         }
         catch (Exception ex)
         {
@@ -689,6 +718,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                          string.Equals(_currentProfile, QuietProfile, StringComparison.OrdinalIgnoreCase);
         SetEnabled(_maxFanSpeedRadioButton, !restricted);
         SetEnabled(_manualFanSpeedRadioButton, !restricted);
+        SetEnabled(_curveFanSpeedRadioButton, !restricted);
         if (_manualDisabledInfoText != null) _manualDisabledInfoText.IsVisible = restricted;
     }
 
@@ -728,7 +758,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     // Quiet keeps the fans on automatic control.
                     EnsureSuccess(await _client.SetFanSpeedAsync(0, 0), "Automatic fan mode");
                     _isManualFanControl = false;
-                    SetRadioButton(_autoFanSpeedRadioButton, true);
+                    _currentFanMode = "auto";
+                    SelectFanModeRadio("auto");
                 }
 
                 ShowStatus($"Thermal profile: {GetProfileInfo(profile).Label}", false);
@@ -813,14 +844,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var cpuSpeed = ApplyFanSpeed(_settings.FanSpeed?.Cpu, ref _cpuFanSpeed, _cpuFanSlider, _cpuFanTextBlock);
         var gpuSpeed = ApplyFanSpeed(_settings.FanSpeed?.Gpu, ref _gpuFanSpeed, _gpuFanSlider, _gpuFanTextBlock);
 
-        var isAutoMode = cpuSpeed == 0 && gpuSpeed == 0;
-        var isMaxMode = cpuSpeed >= 100 && gpuSpeed >= 100;
-        var isManualMode = !isAutoMode && !isMaxMode;
+        // Newer daemons report fan_mode (incl. "curve"); older ones only the raw speeds.
+        var mode = (_settings.FanMode ?? "").Trim().ToLowerInvariant();
+        if (mode is not ("auto" or "max" or "manual" or "curve"))
+            mode = cpuSpeed == 0 && gpuSpeed == 0 ? "auto"
+                : cpuSpeed >= 100 && gpuSpeed >= 100 ? "max"
+                : "manual";
 
-        _isManualFanControl = isManualMode;
-        SetRadioButton(_autoFanSpeedRadioButton, isAutoMode);
-        SetRadioButton(_maxFanSpeedRadioButton, isMaxMode);
-        SetRadioButton(_manualFanSpeedRadioButton, isManualMode);
+        _currentFanMode = mode;
+        _isManualFanControl = mode == "manual";
+        SelectFanModeRadio(mode);
+    }
+
+    private void SelectFanModeRadio(string mode)
+    {
+        SetRadioButton(_autoFanSpeedRadioButton, mode == "auto");
+        SetRadioButton(_maxFanSpeedRadioButton, mode == "max");
+        SetRadioButton(_manualFanSpeedRadioButton, mode == "manual");
+        SetRadioButton(_curveFanSpeedRadioButton, mode == "curve");
     }
 
     private void UpdateUIElementVisibility()
@@ -1147,6 +1188,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             await RunDaemonAction("Fan speed", async () =>
             {
                 EnsureSuccess(await _client.SetFanSpeedAsync(_cpuFanSpeed, _gpuFanSpeed), "Set fan speed");
+                _currentFanMode = _cpuFanSpeed == 0 && _gpuFanSpeed == 0 ? "auto" : "manual";
                 ShowStatus($"Fans: CPU {FormatFanSpeed(_cpuFanSpeed)} · GPU {FormatFanSpeed(_gpuFanSpeed)}", false);
             });
         }
@@ -1159,19 +1201,87 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void AutoFanSpeedRadioButtonClick(object? sender, RoutedEventArgs e)
     {
-        await RunDaemonAction("Fan mode", async () =>
+        var previous = _currentFanMode;
+        var ok = await RunDaemonAction("Fan mode", async () =>
         {
             EnsureSuccess(await _client.SetFanSpeedAsync(0, 0), "Automatic fan mode");
             _isManualFanControl = false;
+            _currentFanMode = "auto";
             ShowStatus("Fans: automatic", false);
         });
+        if (!ok) SelectFanModeRadio(previous);
+    }
+
+    private async void CurveFanSpeedRadioButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        var previous = _currentFanMode;
+        var ok = await RunDaemonAction("Fan curve", async () =>
+        {
+            EnsureSuccess(await _client.SetFanModeAsync("curve"), "Fan curve mode");
+            _isManualFanControl = false;
+            _currentFanMode = "curve";
+            ShowStatus("Fans: curve", false);
+        });
+        if (!ok) SelectFanModeRadio(previous);
+        else await RefreshCurveSummaryAsync();
+    }
+
+    private async void EditFanCurveButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var window = new FanCurveWindow(_client);
+            await window.ShowDialog(this);
+
+            if (window.Applied)
+            {
+                _currentFanMode = "curve";
+                SelectFanModeRadio("curve");
+                ShowStatus("Fan curve applied", false);
+            }
+            else if (window.Saved)
+            {
+                ShowStatus("Fan curve saved", false);
+            }
+
+            if (window.Saved && _client.IsConnected) await ReloadSettingsQuietlyAsync();
+            await RefreshCurveSummaryAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Fan curve editor failed: {ex}");
+            ShowStatus($"Fan curve editor: {ex.Message}", true);
+        }
+    }
+
+    /// <summary>"Curve · CPU 62 °C → 45 % · GPU sleep" from get_fan_curve "last".</summary>
+    private async Task RefreshCurveSummaryAsync()
+    {
+        if (_curveSummaryInFlight || _fanCurveSummaryText == null) return;
+        _curveSummaryInFlight = true;
+        try
+        {
+            var info = await _client.GetFanCurveAsync();
+            SetText(_fanCurveSummaryText, (info.Active ? "" : "Inactive · ") + info.Last.Summary());
+        }
+        catch (Exception ex)
+        {
+            SetText(_fanCurveSummaryText, "Live data unavailable");
+            Console.WriteLine($"get_fan_curve failed: {ex.Message}");
+        }
+        finally
+        {
+            _curveSummaryInFlight = false;
+        }
     }
 
     private async void MaxFanSpeedRadioButton_OnClick(object? sender, RoutedEventArgs e)
     {
-        await RunDaemonAction("Fan mode", async () =>
+        var previous = _currentFanMode;
+        var ok = await RunDaemonAction("Fan mode", async () =>
         {
             EnsureSuccess(await _client.SetFanSpeedAsync(100, 100), "Max fan mode");
+            _currentFanMode = "max";
 
             _cpuFanSpeed = 100;
             _gpuFanSpeed = 100;
@@ -1182,6 +1292,94 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SetText(_gpuFanTextBlock, "100%");
             ShowStatus("Fans: maximum", false);
         });
+        if (!ok) SelectFanModeRadio(previous);
+    }
+
+    // ------------------------------------------------------------------ persistence (v5)
+
+    /// <summary>get_persistence → toggle + saved AC / battery summary. Hidden on daemons without it.</summary>
+    private async Task RefreshPersistenceAsync()
+    {
+        var panel = FindInScopes<Control>("PersistencePanel");
+        try
+        {
+            var info = await _client.GetPersistenceAsync();
+            var toggle = FindInScopes<ToggleSwitch>("RestoreOnStartToggle");
+            if (toggle != null) toggle.IsChecked = info.RestoreOnStart;
+
+            var current = info.PowerSource;
+            SetText(FindInScopes<TextBlock>("PersistenceAcText"),
+                DescribeSaved(info.Ac) + (current == "ac" ? "  ·  current" : ""));
+            SetText(FindInScopes<TextBlock>("PersistenceBatteryText"),
+                DescribeSaved(info.Battery) + (current == "battery" ? "  ·  current" : ""));
+            SetVisible(panel, true);
+        }
+        catch (DaemonCommandException ex)
+        {
+            // Older daemon ("Unknown command"): keep the card hidden.
+            Console.WriteLine($"get_persistence: {ex.Message}");
+            SetVisible(panel, false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"get_persistence failed: {ex.Message}");
+        }
+    }
+
+    private static string DescribeSaved(SavedSourceState state)
+    {
+        if (state.ThermalProfile == null && state.FanMode == null) return "Nothing saved";
+
+        var profile = state.ThermalProfile != null ? GetProfileInfo(state.ThermalProfile).Label : "—";
+        var fan = state.FanMode switch
+        {
+            null => "—",
+            "manual" when state.FanManual is { Length: >= 2 } m =>
+                $"Manual {m[0].ToString(Inv)}/{m[1].ToString(Inv)} %",
+            _ => TitleCase(state.FanMode)
+        };
+        return $"{profile} · fan {fan}";
+    }
+
+    private async void RestoreOnStartToggle_OnClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleSwitch toggle) return;
+        var enabled = toggle.IsChecked == true;
+        var ok = await RunSafe(async () =>
+        {
+            EnsureSuccess(await _client.SetPersistenceAsync(enabled), "Restore on startup");
+            ShowStatus(enabled ? "Settings will be restored on startup" : "Settings will not be restored", false);
+        }, "Restore on startup");
+        if (!ok) toggle.IsChecked = !enabled;
+    }
+
+    /// <summary>Two-step confirm: the first click arms the button for 5 s, the second resets.</summary>
+    private async void ResetPersistenceButton_OnClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+
+        if (DateTime.UtcNow > _resetConfirmUntil)
+        {
+            _resetConfirmUntil = DateTime.UtcNow.AddSeconds(5);
+            button.Content = "CLICK AGAIN TO CONFIRM";
+            var disarm = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5.1) };
+            disarm.Tick += (_, _) =>
+            {
+                disarm.Stop();
+                if (DateTime.UtcNow >= _resetConfirmUntil) button.Content = "RESET SAVED SETTINGS";
+            };
+            disarm.Start();
+            return;
+        }
+
+        _resetConfirmUntil = DateTime.MinValue;
+        button.Content = "RESET SAVED SETTINGS";
+        await RunSafe(async () =>
+        {
+            EnsureSuccess(await _client.ResetPersistenceAsync(), "Reset saved settings");
+            ShowStatus("Saved AC / battery settings cleared (fan curve kept)", false);
+        }, "Reset saved settings");
+        await RefreshPersistenceAsync();
     }
 
     // ------------------------------------------------------------------ battery

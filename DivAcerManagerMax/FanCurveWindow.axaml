@@ -1,0 +1,97 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:DivAcerManagerMax"
+        x:Class="DivAcerManagerMax.FanCurveWindow"
+        Width="760" Height="520" MinWidth="640" MinHeight="460"
+        Title="DAMX // Fan curve"
+        Icon="iconTransparent.png"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource BgBrush}">
+
+    <Window.Styles>
+        <Style Selector="TextBlock.FieldLabel">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{StaticResource InkMutedBrush}" />
+            <Setter Property="Margin" Value="0 0 8 0" />
+        </Style>
+        <Style Selector="Button.Small">
+            <Setter Property="Padding" Value="10 4" />
+            <Setter Property="MinHeight" Value="28" />
+        </Style>
+    </Window.Styles>
+
+    <Grid Margin="16" RowDefinitions="Auto,*,Auto,Auto">
+
+        <!-- Title + series switch + live sample -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*" Margin="0 0 0 12">
+            <TextBlock Text="FAN CURVE" Classes="CardTitle" VerticalAlignment="Center" Margin="0 0 16 0" />
+            <UniformGrid Grid.Column="1" Rows="1" Width="160">
+                <RadioButton x:Name="CpuSeriesRadioButton" GroupName="CurveSeriesGroup" IsChecked="True"
+                             Theme="{StaticResource SegmentRadio}" Margin="0 0 6 0" Content="CPU"
+                             Click="CpuSeriesRadioButton_OnClick" />
+                <RadioButton x:Name="GpuSeriesRadioButton" GroupName="CurveSeriesGroup"
+                             Theme="{StaticResource SegmentRadio}" Content="GPU"
+                             Click="GpuSeriesRadioButton_OnClick" />
+            </UniformGrid>
+            <TextBlock x:Name="CurveLiveText" Grid.Column="2" Classes="Hint" HorizontalAlignment="Right"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                       Text="Live: —" />
+        </Grid>
+
+        <!-- Plot -->
+        <local:HudPanel Grid.Row="1" Classes="Card" Padding="12">
+            <local:FanCurveEditor x:Name="CurveEditor"
+                                  ToolTip.Tip="Drag points · double-click to add · right-click to remove" />
+        </local:HudPanel>
+
+        <!-- Presets, point tools, engine settings -->
+        <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0 12 0 0">
+            <WrapPanel Orientation="Horizontal">
+                <TextBlock Text="Presets" Classes="FieldLabel" />
+                <Button x:Name="PresetSilentButton" Content="SILENT" Classes="Small Spaced"
+                        Click="PresetSilentButton_OnClick" />
+                <Button x:Name="PresetBalancedButton" Content="BALANCED" Classes="Small Spaced"
+                        Click="PresetBalancedButton_OnClick" />
+                <Button x:Name="PresetAggressiveButton" Content="AGGRESSIVE" Classes="Small Spaced"
+                        Click="PresetAggressiveButton_OnClick" />
+                <Button x:Name="CopyCpuToGpuButton" Content="COPY CPU → GPU" Classes="Small Spaced"
+                        Click="CopyCpuToGpuButton_OnClick" />
+                <Button x:Name="AddPointButton" Content="+" Classes="Small Spaced" ToolTip.Tip="Add point (max 8)"
+                        Click="AddPointButton_OnClick" />
+                <Button x:Name="RemovePointButton" Content="−" Classes="Small Spaced"
+                        ToolTip.Tip="Remove selected point (min 2)" Click="RemovePointButton_OnClick" />
+            </WrapPanel>
+
+            <StackPanel Grid.Column="1" Spacing="4" Width="220" Margin="16 0 0 0">
+                <Grid ColumnDefinitions="76,*,36">
+                    <TextBlock Text="Hysteresis" Classes="FieldLabel" />
+                    <Slider x:Name="HysteresisSlider" Grid.Column="1" Minimum="0" Maximum="10" TickFrequency="1"
+                            IsSnapToTickEnabled="True" Value="4" />
+                    <TextBlock x:Name="HysteresisValueText" Grid.Column="2" Classes="Value" Text="4 °C"
+                               HorizontalAlignment="Right" />
+                </Grid>
+                <Grid ColumnDefinitions="76,*,36">
+                    <TextBlock Text="Interval" Classes="FieldLabel" />
+                    <Slider x:Name="IntervalSlider" Grid.Column="1" Minimum="1" Maximum="10" TickFrequency="1"
+                            IsSnapToTickEnabled="True" Value="2" />
+                    <TextBlock x:Name="IntervalValueText" Grid.Column="2" Classes="Value" Text="2 s"
+                               HorizontalAlignment="Right" />
+                </Grid>
+            </StackPanel>
+        </Grid>
+
+        <!-- Errors + actions -->
+        <Grid Grid.Row="3" ColumnDefinitions="*,Auto" Margin="0 12 0 0">
+            <TextBlock x:Name="CurveErrorText" Classes="Hint" VerticalAlignment="Center" TextWrapping="Wrap"
+                       Text="≥ 95 °C always runs the fans at 100 %. 0 % is not allowed (it means firmware auto)." />
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="16 0 0 0">
+                <Button x:Name="CurveCancelButton" Content="CANCEL" Click="CurveCancelButton_OnClick" />
+                <Button x:Name="CurveSaveButton" Content="SAVE" ToolTip.Tip="Save without switching to curve mode"
+                        Click="CurveSaveButton_OnClick" />
+                <Button x:Name="CurveApplyButton" Content="APPLY" Classes="Primary"
+                        ToolTip.Tip="Save and run the curve now" Click="CurveApplyButton_OnClick" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

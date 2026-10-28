@@ -447,6 +447,38 @@
                                 </local:HudPanel>
                             </Grid>
 
+                            <!-- Restore settings on startup (get/set/reset_persistence) -->
+                            <local:HudPanel x:Name="PersistencePanel" Classes="Card" Margin="0 0 0 16" IsVisible="False">
+                                <StackPanel>
+                                    <Grid Classes="CardHeader" ColumnDefinitions="*,Auto">
+                                        <StackPanel>
+                                            <TextBlock Text="RESTORE SETTINGS ON STARTUP" Classes="CardTitle" />
+                                            <TextBlock Classes="CardCaption"
+                                                       Text="Thermal profile and fan mode are remembered separately for AC and battery and re-applied at boot, after sleep and when the charger is plugged/unplugged." />
+                                        </StackPanel>
+                                        <ToggleSwitch x:Name="RestoreOnStartToggle" Grid.Column="1" Margin="16 0 0 0"
+                                                      VerticalAlignment="Top" OnContent="On" OffContent="Off"
+                                                      Click="RestoreOnStartToggle_OnClick" />
+                                    </Grid>
+
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="AC power" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="PersistenceAcText" Grid.Column="2" Classes="Value" Text="—" />
+                                    </Grid>
+                                    <Grid Classes="KeyValue" ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock Text="Battery" Classes="Label" />
+                                        <local:DotLeader Grid.Column="1" />
+                                        <TextBlock x:Name="PersistenceBatteryText" Grid.Column="2" Classes="Value" Text="—" />
+                                    </Grid>
+
+                                    <Button x:Name="ResetPersistenceButton" Content="RESET SAVED SETTINGS" Classes="Danger"
+                                            HorizontalAlignment="Left" Margin="0 12 0 0"
+                                            ToolTip.Tip="Forget the saved AC / battery settings (the fan curve is kept)"
+                                            Click="ResetPersistenceButton_OnClick" />
+                                </StackPanel>
+                            </local:HudPanel>
+
                             <!-- System Information -->
                             <local:HudPanel Classes="Card" Margin="0 0 0 16">
                                 <StackPanel>

@@ -231,11 +231,24 @@
                                 <RadioButton x:Name="MaxFanSpeedRadioButton" GroupName="FanModeGroup"
                                              Theme="{StaticResource SegmentRadio}" Margin="0 0 6 0" Content="MAX" />
                                 <RadioButton x:Name="ManualFanSpeedRadioButton" GroupName="FanModeGroup"
-                                             Theme="{StaticResource SegmentRadio}" Content="MANUAL" />
+                                             Theme="{StaticResource SegmentRadio}" Margin="0 0 6 0" Content="MANUAL" />
+                                <RadioButton x:Name="CurveFanSpeedRadioButton" GroupName="FanModeGroup"
+                                             Theme="{StaticResource SegmentRadio}" Content="CURVE"
+                                             ToolTip.Tip="Temperature-driven fan curve run by the daemon" />
                             </UniformGrid>
 
                             <TextBlock x:Name="ManualDisabledInfoText" Classes="Hint" Margin="0 8 0 0" IsVisible="False"
                                        Text="Manual and max fan modes are disabled in the quiet profile." />
+
+                            <!-- Curve: one-line live summary + editor, only while CURVE is selected -->
+                            <Grid Margin="0 12 0 0" ColumnDefinitions="*,Auto"
+                                  IsVisible="{Binding ElementName=CurveFanSpeedRadioButton, Path=IsChecked}">
+                                <TextBlock x:Name="FanCurveSummaryText" Classes="Hint" VerticalAlignment="Center"
+                                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="—"
+                                           ToolTip.Tip="Live output of the daemon's curve engine" />
+                                <Button x:Name="EditFanCurveButton" Grid.Column="1" Content="EDIT CURVE"
+                                        Margin="12 0 0 0" />
+                            </Grid>
 
                             <!-- Manual sliders: only while MANUAL is selected -->
                             <Grid Margin="0 12 0 0" ColumnDefinitions="*,Auto" RowDefinitions="Auto,8,Auto"

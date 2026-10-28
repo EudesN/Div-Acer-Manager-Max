@@ -82,6 +82,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private PpdSyncInfo? _ppdInfo;
     private readonly Dictionary<string, ComboBox> _ppdToSystemCombos = new(StringComparer.OrdinalIgnoreCase);
     private bool _profilePollInFlight;
+    private bool? _fanControlPaused; // null = daemon does not report it (older versions)
+    private bool _powerdReconciling;
 
     // v5: fan curve + persistence
     private RadioButton? _curveFanSpeedRadioButton;
@@ -729,8 +731,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>Quiet profile: fans stay automatic (manual / max disabled) unless dev mode is on.</summary>
     private void UpdateFanModeAvailability()
     {
-        var restricted = !AppState.DevMode &&
-                         string.Equals(_currentProfile, QuietProfile, StringComparison.OrdinalIgnoreCase);
+        var restricted = _fanControlPaused ?? (!AppState.DevMode &&
+                                               string.Equals(_currentProfile, QuietProfile,
+                                                   StringComparison.OrdinalIgnoreCase));
         SetEnabled(_maxFanSpeedRadioButton, !restricted);
         SetEnabled(_manualFanSpeedRadioButton, !restricted);
         SetEnabled(_curveFanSpeedRadioButton, !restricted);
@@ -768,14 +771,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 UpdateProfileInfoText(profile);
                 UpdateFanModeAvailability();
 
-                if (string.Equals(profile, QuietProfile, StringComparison.OrdinalIgnoreCase) && !AppState.DevMode)
+                // Quiet: the daemon pauses fan control (firmware auto) and resumes the saved mode
+                // when leaving Quiet. Show that right away; the settings re-read below confirms it.
+                if (string.Equals(profile, QuietProfile, StringComparison.OrdinalIgnoreCase))
                 {
-                    // Quiet keeps the fans on automatic control.
-                    EnsureSuccess(await _client.SetFanSpeedAsync(0, 0), "Automatic fan mode");
+                    _fanControlPaused = true;
                     _isManualFanControl = false;
-                    _currentFanMode = "auto";
                     SelectFanModeRadio("auto");
                 }
+
+                UpdateFanModeAvailability();
 
                 ShowStatus($"Thermal profile: {GetProfileInfo(profile).Label}", false);
             }, "Thermal profile");
@@ -829,7 +834,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (_usbChargingComboBox != null)
                 _usbChargingComboBox.SelectedIndex = GetUsbChargingIndex(_settings.UsbCharging);
 
+            _fanControlPaused = _settings.FanControlPaused;
             ApplyFanModeFromSettings();
+            UpdateFanModeAvailability();
             ApplyKeyboardSettings();
 
             SetText(_keyBrightnessText, $"{_keyboardBrightness}%");
@@ -1203,7 +1210,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             await RunDaemonAction("Fan speed", async () =>
             {
                 EnsureSuccess(await _client.SetFanSpeedAsync(_cpuFanSpeed, _gpuFanSpeed), "Set fan speed");
-                _currentFanMode = _cpuFanSpeed == 0 && _gpuFanSpeed == 0 ? "auto" : "manual";
+                _currentFanMode = _cpuFanSpeed == 0 && _gpuFanSpeed == 0 ? "auto"
+                    : _cpuFanSpeed >= 100 && _gpuFanSpeed >= 100 ? "max"
+                    : "manual";
+                SelectFanModeRadio(_currentFanMode);
                 ShowStatus($"Fans: CPU {FormatFanSpeed(_cpuFanSpeed)} · GPU {FormatFanSpeed(_gpuFanSpeed)}", false);
             });
         }
@@ -1419,6 +1429,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (string.Equals(current, _currentProfile, StringComparison.OrdinalIgnoreCase) && !availableChanged)
                 return;
 
+            if (!string.Equals(current, _currentProfile, StringComparison.OrdinalIgnoreCase))
+            {
+                // e.g. Quiet picked in the desktop power menu: fan pause / resumed fan mode come with the settings.
+                await ReloadSettingsQuietlyAsync();
+                return;
+            }
+
             tp.Current = current;
             if (available.Count > 0) tp.Available = available;
             _applyingSettings = true;
@@ -1494,18 +1511,51 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void NvidiaPowerdToggle_OnClick(object? sender, RoutedEventArgs e)
     {
-        if (sender is not ToggleSwitch toggle) return;
+        if (sender is not ToggleSwitch toggle || _powerdReconciling) return;
         var enabled = toggle.IsChecked == true;
         var ok = await RunSafe(async () =>
         {
             EnsureSuccess(await _client.SetNvidiaPowerdAsync(enabled), "nvidia-powerd");
-            ShowStatus(enabled ? "nvidia-powerd enabled" : "nvidia-powerd disabled", false);
         }, "nvidia-powerd");
-        if (!ok) toggle.IsChecked = !enabled;
-        await RefreshGpuPowerAsync();
+
+        if (!ok)
+        {
+            toggle.IsChecked = !enabled;
+            await RefreshGpuPowerAsync();
+            return;
+        }
+
+        // The daemon replied {"scheduled": true} and runs systemctl in the background: keep the
+        // requested state, say so, then reconcile with the real status at ~2 s and ~5 s.
+        _powerdReconciling = true;
+        toggle.IsChecked = enabled;
+        toggle.IsEnabled = false;
+        SetText(FindInScopes<TextBlock>("NvidiaPowerdStatusText"), enabled ? "Enabling… (applying)" : "Disabling… (applying)");
+        ShowStatus(enabled ? "Enabling nvidia-powerd…" : "Disabling nvidia-powerd…", false);
+        try
+        {
+            await Task.Delay(2000);
+            await RefreshGpuPowerAsync();
+            await Task.Delay(3000);
+            await RefreshGpuPowerAsync();
+        }
+        finally
+        {
+            _powerdReconciling = false;
+            if (!toggle.IsEnabled && FindInScopes<TextBlock>("NvidiaPowerdStatusText")?.Text?.EndsWith("(applying)") == true)
+            {
+                toggle.IsEnabled = true; // both re-queries failed: don't leave the switch locked
+                SetText(FindInScopes<TextBlock>("NvidiaPowerdStatusText"), "Unknown (could not re-read status)");
+            }
+            if (toggle.IsChecked != enabled)
+                ShowStatus($"nvidia-powerd is still {(enabled ? "inactive" : "active")} — check the daemon log", true);
+        }
     }
 
     // ------------------------------------------------------------------ ppd sync (v6)
+
+    private static readonly HashSet<string> PpdMappableProfiles = new(StringComparer.OrdinalIgnoreCase)
+        { "low-power", "quiet", "balanced", "balanced-performance", "performance", "cool", "custom" };
 
     private static readonly string[] FallbackAcerProfiles =
         { "low-power", "quiet", "balanced", "balanced-performance", "performance" };
@@ -1610,6 +1660,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var ppdKeys = PpdSyncInfo.PpdProfiles.ToList();
         foreach (var profile in acer)
         {
+            if (!PpdMappableProfiles.Contains(profile)) continue; // the daemon would reject unknown names
             var row = new Grid();
             row.ColumnDefinitions.Add(new ColumnDefinition(96, GridUnitType.Pixel));
             row.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));

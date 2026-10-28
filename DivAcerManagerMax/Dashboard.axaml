@@ -269,7 +269,7 @@
                             </UniformGrid>
 
                             <TextBlock x:Name="ManualDisabledInfoText" Classes="Hint" Margin="0 8 0 0" IsVisible="False"
-                                       Text="Manual and max fan modes are disabled in the quiet profile." />
+                                       Text="Fan control paused in Quiet" />
 
                             <!-- Curve: one-line live summary + editor, only while CURVE is selected -->
                             <Grid Margin="0 12 0 0" ColumnDefinitions="*,Auto"

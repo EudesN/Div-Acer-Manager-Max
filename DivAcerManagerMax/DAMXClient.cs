@@ -226,8 +226,9 @@ public class DAMXClient : IDisposable
     ///     Retries only when nothing was sent yet (or for read-only get_* / ping commands).
     /// </summary>
     public async Task<JsonDocument> SendCommandAsync(string command, Dictionary<string, object>? parameters = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, TimeSpan? timeout = null)
     {
+        var commandTimeout = timeout ?? CommandTimeout;
         if (_disposed) throw new ObjectDisposedException(nameof(DAMXClient));
 
         var request = new Dictionary<string, object>
@@ -250,17 +251,17 @@ public class DAMXClient : IDisposable
                     await ConnectCoreAsync(cancellationToken);
 
                 var socket = _socket!;
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(CommandTimeout);
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(commandTimeout);
 
                 while (bytesSent < payload.Length)
                 {
-                    var n = await socket.SendAsync(payload.AsMemory(bytesSent), SocketFlags.None, timeout.Token);
+                    var n = await socket.SendAsync(payload.AsMemory(bytesSent), SocketFlags.None, timeoutCts.Token);
                     if (n <= 0) throw new IOException("Daemon socket refused data");
                     bytesSent += n;
                 }
 
-                var line = await ReadLineAsync(socket, timeout.Token);
+                var line = await ReadLineAsync(socket, timeoutCts.Token);
                 return JsonDocument.Parse(line);
             }
             catch (DaemonPermissionException)
@@ -271,7 +272,7 @@ public class DAMXClient : IDisposable
             {
                 ResetConnectionCore();
                 _state = DaemonConnectionState.Error;
-                failure = new TimeoutException($"Daemon did not answer '{command}' within {CommandTimeout.TotalSeconds:0} s");
+                failure = new TimeoutException($"Daemon did not answer '{command}' within {commandTimeout.TotalSeconds:0} s");
             }
             catch (Exception ex) when (ex is SocketException or IOException or ObjectDisposedException
                                            or JsonException or InvalidOperationException)
@@ -300,9 +301,10 @@ public class DAMXClient : IDisposable
 
     /// <summary>Send a command and return a detached result (no JsonDocument to dispose).</summary>
     public async Task<DaemonResult> SendCommandResultAsync(string command,
-        Dictionary<string, object>? parameters = null, CancellationToken cancellationToken = default)
+        Dictionary<string, object>? parameters = null, CancellationToken cancellationToken = default,
+        TimeSpan? timeout = null)
     {
-        using var doc = await SendCommandAsync(command, parameters, cancellationToken);
+        using var doc = await SendCommandAsync(command, parameters, cancellationToken, timeout);
         return ToResult(doc);
     }
 
@@ -629,7 +631,10 @@ public class DAMXClient : IDisposable
     /// <summary>Privileged: enables/disables nvidia-powerd.service (data: {"powerd": {...}}).</summary>
     public Task<DaemonResult> SetNvidiaPowerdAsync(bool enabled)
     {
-        return SendCommandResultAsync("set_nvidia_powerd", new Dictionary<string, object> { { "enabled", enabled } });
+        // The daemon replies at once ({"scheduled": true}) and runs systemctl in the background;
+        // 10 s is only a safety margin for older daemons that still wait for systemctl.
+        return SendCommandResultAsync("set_nvidia_powerd", new Dictionary<string, object> { { "enabled", enabled } },
+            default, TimeSpan.FromSeconds(10));
     }
 
     public async Task<PpdSyncInfo> GetPpdSyncAsync()
@@ -777,6 +782,9 @@ public class DAMXSettings
     public string FanMode { get; set; } = "";
 
     [JsonPropertyName("fan_curve_active")] public bool? FanCurveActive { get; set; }
+
+    /// <summary>True while the daemon pauses fan control (Quiet profile: firmware auto, fan commands rejected).</summary>
+    [JsonPropertyName("fan_control_paused")] public bool? FanControlPaused { get; set; }
 
     [JsonPropertyName("restore_on_start")] public bool? RestoreOnStart { get; set; }
 

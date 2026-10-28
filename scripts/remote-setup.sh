@@ -858,6 +858,8 @@ RestartSec=5
 User=root
 RuntimeDirectory=damx
 RuntimeDirectoryMode=0700
+StateDirectory=damx
+StateDirectoryMode=0755
 StandardOutput=journal
 StandardError=journal
 

@@ -29,7 +29,9 @@ import traceback
 from enum import Enum
 from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
-from PowerSourceDetection import PowerSourceDetector
+from FanCurve import CurveEngine, presets as fan_curve_presets, validate_curve
+from Persistence import StateStore
+from PowerSourceDetection import PowerSourceDetector, read_external_power
 
 # Constants
 VERSION = "0.5.2"
@@ -41,6 +43,10 @@ MODPROBE_CONFIG_PATH = "/etc/modprobe.d/linuwu-sense.conf"
 # Runtime state (restart counter, ...).  The systemd unit sets
 # RuntimeDirectory=damx; the daemon creates it with 0700 if missing.
 RUNTIME_DIR = "/run/damx"
+# Persistent user settings (systemd unit sets StateDirectory=damx).
+STATE_PATH = "/var/lib/damx/state.json"
+FAN_MODES = ("auto", "max", "manual", "curve")
+PERSISTED_TOGGLES = ("battery_limiter", "backlight_timeout")
 
 MODULE_NAME = "linuwu_sense"
 SERVICE_NAME = "damx-daemon.service"
@@ -251,7 +257,13 @@ class DAMXManager:
         self.lock = threading.RLock()
         self._task_lock = threading.Lock()
         self._tls = threading.local()
+        # Serialises fan-mode transitions (engine stop/start + manual writes).
+        # Never held by the engine thread, so stopping the engine cannot deadlock.
+        self._fan_mode_lock = threading.Lock()
         self.power_monitor = None
+        self.state = StateStore(STATE_PATH)
+        self.curve_engine = CurveEngine(self._engine_write)
+        self._startup_restore: Optional[Tuple[str, bool]] = None
 
         log.info(f"** Starting DAMX-Daemon v{VERSION} **")
 
@@ -885,9 +897,12 @@ class DAMXManager:
         return self._read_fan_values() or ("0", "0")
 
     def get_fan_mode(self) -> str:
-        """Current fan mode reported by the driver: auto, max, manual, unknown or ''."""
+        """Current fan mode: curve (engine running), else from the driver: auto, max,
+        manual, unknown; '' when fan control is unavailable."""
         if "fan_speed" not in self.available_features:
             return ""
+        if self.curve_engine.active:
+            return "curve"
         values = self._read_fan_values()
         if values is None:
             return "unknown"
@@ -901,8 +916,19 @@ class DAMXManager:
             return "max"
         return "manual"
 
+    def _write_fan(self, cpu: int, gpu: int) -> bool:
+        with self.lock:
+            return self._write_file(os.path.join(self.base_path, "fan_speed"), f"{cpu},{gpu}")
+
+    def _engine_write(self, cpu: int, gpu: int, stop_event: threading.Event) -> bool:
+        """Write used by the curve engine; refuses once the engine was stopped."""
+        with self.lock:
+            if stop_event.is_set():
+                return False
+            return self._write_fan(cpu, gpu)
+
     def set_fan_speed(self, cpu: int, gpu: int) -> bool:
-        """Set CPU and GPU fan speeds (0 = auto, 1..100 = percent)"""
+        """Set CPU and GPU fan speeds (0 = auto, 1..100 = percent); stops the curve engine."""
         if "fan_speed" not in self.available_features:
             self._set_last_error("fan speed control is not supported on this device")
             return False
@@ -910,8 +936,136 @@ class DAMXManager:
             self._set_last_error("fan speeds must be integers between 0 and 100")
             log.error(f"Invalid fan speeds. Values must be integers 0-100: cpu={_short(cpu)}, gpu={_short(gpu)}")
             return False
-        with self.lock:
-            return self._write_file(os.path.join(self.base_path, "fan_speed"), f"{cpu},{gpu}")
+        with self._fan_mode_lock:
+            self.curve_engine.stop()
+            return self._write_fan(cpu, gpu)
+
+    @staticmethod
+    def fan_mode_for_speeds(cpu: int, gpu: int) -> str:
+        """Legacy set_fan_speed mapping: 0,0 -> auto, 100,100 -> max, else manual."""
+        if cpu == 0 and gpu == 0:
+            return "auto"
+        if cpu == 100 and gpu == 100:
+            return "max"
+        return "manual"
+
+    def set_fan_mode(self, mode: str, cpu: Optional[int] = None, gpu: Optional[int] = None,
+                     curve: Optional[Dict] = None) -> bool:
+        """auto/max/manual stop the curve engine before writing; curve starts it
+        (with ``curve`` or the saved curve).  Manual accepts 0..100 here so legacy
+        values restored from state work; the socket API enforces 1..100."""
+        if "fan_speed" not in self.available_features:
+            self._set_last_error("fan speed control is not supported on this device")
+            return False
+        if mode not in FAN_MODES:
+            self._set_last_error(f"invalid fan mode {_short(mode)}")
+            return False
+        with self._fan_mode_lock:
+            if mode == "curve":
+                try:
+                    self.curve_engine.start(curve if curve is not None else self.state.curve())
+                except ValueError as e:
+                    self._set_last_error(f"invalid fan curve: {e}")
+                    return False
+                return True
+            if mode == "auto":
+                cpu, gpu = 0, 0
+            elif mode == "max":
+                cpu, gpu = 100, 100
+            elif not (_is_int(cpu) and _is_int(gpu) and 0 <= cpu <= 100 and 0 <= gpu <= 100):
+                self._set_last_error("manual fan speeds must be integers between 1 and 100")
+                return False
+            self.curve_engine.stop()
+            return self._write_fan(cpu, gpu)
+
+    def shutdown_fans(self):
+        """On daemon shutdown: stop the engine and hand the fans back to firmware."""
+        with self._fan_mode_lock:
+            self.curve_engine.stop(write_auto=True)
+
+    # ------------------------------------------------------------ persistence / restore
+    def power_source(self) -> str:
+        """'ac' or 'battery' (debounced state of the power monitor if available)."""
+        pm = self.power_monitor
+        if pm is not None and pm.current_source is not None:
+            return "ac" if pm.current_source else "battery"
+        return "battery" if read_external_power() is False else "ac"
+
+    def persist_source(self, **fields):
+        self.state.update_source(self.power_source(), **fields)
+
+    def persist_fan_mode(self, mode: str, cpu: Optional[int] = None, gpu: Optional[int] = None):
+        fields = {"fan_mode": mode}
+        if mode == "manual":
+            fields["fan_manual"] = [cpu, gpu]
+        self.persist_source(**fields)
+
+    def _restore_fan(self, entry: Dict):
+        mode = entry.get("fan_mode")
+        if not mode or "fan_speed" not in self.available_features:
+            return
+        if mode == "manual":
+            manual = entry.get("fan_manual")
+            if not manual:
+                log.warning("Saved manual fan mode has no speeds; skipping")
+                return
+            ok = self.set_fan_mode("manual", manual[0], manual[1])
+        else:
+            ok = self.set_fan_mode(mode)
+            if ok and mode == "curve":
+                self.curve_engine.request_reassert()
+        log.info(f"Restored fan mode '{mode}'" if ok else f"Could not restore fan mode '{mode}': {self.last_error}")
+
+    def restore_power_source(self, is_ac: bool, reason: str = "change") -> bool:
+        """Apply the saved profile + fan mode of a power source.
+
+        Returns True when a saved thermal profile was applied (the automatic
+        battery logic is then skipped).
+        """
+        if not self.state.restore_on_start:
+            return False
+        src = "ac" if is_ac else "battery"
+        if reason == "initial" and self._startup_restore is not None:
+            started_src, started_applied = self._startup_restore
+            self._startup_restore = None
+            if started_src == src:
+                return started_applied  # already restored at daemon start
+        entry = self.state.source(src)
+        applied = False
+        profile = entry.get("thermal_profile")
+        if profile and "thermal_profile" in self.available_features:
+            choices = self.get_thermal_profile_choices()
+            if profile not in choices:
+                log.info(f"Saved {src} thermal profile '{profile}' is not offered by the kernel "
+                         f"({', '.join(choices) or 'none'}); skipping")
+            elif self.set_thermal_profile(profile):
+                log.info(f"Restored {src} thermal profile '{profile}' ({reason})")
+                applied = True
+            else:
+                log.warning(f"Could not restore {src} thermal profile '{profile}': {self.last_error}")
+        self._restore_fan(entry)
+        return applied
+
+    def restore_state(self, reason: str = "start") -> bool:
+        """Full restore at start and after resume: settings + current source."""
+        if not self.state.restore_on_start:
+            log.info("Settings restore disabled (restore_on_start=false)")
+            return False
+        settings = self.state.settings()
+        for name in ("battery_limiter", "backlight_timeout"):
+            value = settings.get(name)
+            if value is not None and name in self.available_features:
+                if not getattr(self, "set_" + name)(value):
+                    log.warning(f"Could not restore {name}: {self.last_error}")
+        level = settings.get("usb_charging")
+        if level is not None and "usb_charging" in self.available_features:
+            if not self.set_usb_charging(level):
+                log.warning(f"Could not restore usb_charging: {self.last_error}")
+        src = self.power_source()
+        applied = self.restore_power_source(src == "ac", reason)
+        if reason == "start":
+            self._startup_restore = (src, applied)
+        return applied
 
     # ------------------------------------------------------------ usb charging
     def get_usb_charging(self) -> str:
@@ -1033,6 +1187,9 @@ class DAMXManager:
             settings["fan_speed"] = {"cpu": cpu_fan, "gpu": gpu_fan}
             settings["fan_mode"] = self.get_fan_mode()
 
+        settings["fan_curve_active"] = self.curve_engine.active
+        settings["restore_on_start"] = self.state.restore_on_start
+        settings["power_source"] = self.power_source()
         return settings
 
 
@@ -1125,6 +1282,12 @@ class DaemonServer:
             "set_per_zone_mode": self._cmd_set_per_zone_mode,
             "set_four_zone_mode": self._cmd_set_four_zone_mode,
             "get_modprobe_parameter": self._cmd_get_modprobe_parameter,
+            "set_fan_mode": self._cmd_set_fan_mode,
+            "get_fan_curve": self._cmd_get_fan_curve,
+            "set_fan_curve": self._cmd_set_fan_curve,
+            "get_persistence": self._cmd_get_persistence,
+            "set_persistence": self._cmd_set_persistence,
+            "reset_persistence": self._cmd_reset_persistence,
             "force_nitro_model": self._make_force("nitro_v4"),
             "force_predator_model": self._make_force("predator_v4"),
             "force_enable_all": self._make_force("enable_all"),
@@ -1494,6 +1657,7 @@ class DaemonServer:
         self._require_feature("thermal_profile", "Thermal profile")
         profile = _str_param(params, "profile")
         if self.manager.set_thermal_profile(profile):
+            self.manager.persist_source(thermal_profile=profile)
             return _ok({"profile": profile})
         return self._failure(f"Failed to set thermal profile {_short(profile)}")
 
@@ -1502,6 +1666,8 @@ class DaemonServer:
             self._require_feature(feature, label)
             enabled = _bool_param(params, "enabled")
             if getattr(self.manager, "set_" + feature)(enabled):
+                if feature in PERSISTED_TOGGLES:
+                    self.manager.state.set_setting(feature, enabled)
                 return _ok({"enabled": enabled})
             return self._failure(f"Failed to set {label.lower()}")
         return handler
@@ -1510,9 +1676,62 @@ class DaemonServer:
         self._require_feature("fan_speed", "Fan speed control")
         cpu = _int_param(params, "cpu", 0, 100)
         gpu = _int_param(params, "gpu", 0, 100)
+        mode = self.manager.fan_mode_for_speeds(cpu, gpu)
         if self.manager.set_fan_speed(cpu, gpu):
+            self.manager.persist_fan_mode(mode, cpu, gpu)
             return _ok({"cpu": cpu, "gpu": gpu})
         return self._failure("Failed to set fan speed")
+
+    def _cmd_set_fan_mode(self, params, post):
+        self._require_feature("fan_speed", "Fan speed control")
+        mode = _require(params, "mode")
+        if mode not in FAN_MODES:
+            raise RequestError("parameter 'mode' must be one of auto, max, manual, curve")
+        cpu = gpu = None
+        if mode == "manual":
+            cpu = _int_param(params, "cpu", 1, 100)
+            gpu = _int_param(params, "gpu", 1, 100)
+        if not self.manager.set_fan_mode(mode, cpu, gpu):
+            return self._failure(f"Failed to set fan mode {mode}")
+        self.manager.persist_fan_mode(mode, cpu, gpu)
+        return _ok({"fan_mode": mode})
+
+    def _cmd_get_fan_curve(self, params, post):
+        engine = self.manager.curve_engine
+        return _ok({"curve": self.manager.state.curve(), "active": engine.active,
+                    "presets": fan_curve_presets(), "last": dict(engine.last)})
+
+    def _cmd_set_fan_curve(self, params, post):
+        try:
+            curve = validate_curve(_require(params, "curve"))
+        except ValueError as e:
+            raise RequestError(str(e))
+        activate = False
+        if "activate" in params:
+            activate = _bool_param(params, "activate")
+        if activate:
+            self._require_feature("fan_speed", "Fan speed control")
+        self.manager.state.set_curve(curve)
+        if activate or self.manager.curve_engine.active:
+            if not self.manager.set_fan_mode("curve", curve=curve):
+                return self._failure("Failed to apply fan curve")
+            if activate:
+                self.manager.persist_fan_mode("curve")
+        return _ok({"curve": curve, "active": self.manager.curve_engine.active})
+
+    def _cmd_get_persistence(self, params, post):
+        state = self.manager.state.snapshot()
+        return _ok({"restore_on_start": state["restore_on_start"], "state": state,
+                    "power_source": self.manager.power_source()})
+
+    def _cmd_set_persistence(self, params, post):
+        value = _bool_param(params, "restore_on_start")
+        self.manager.state.set_restore_on_start(value)
+        return _ok({"restore_on_start": value})
+
+    def _cmd_reset_persistence(self, params, post):
+        self.manager.state.reset()
+        return _ok({"cleared": True})
 
     def _cmd_set_usb_charging(self, params, post):
         self._require_feature("usb_charging", "USB charging control")
@@ -1520,6 +1739,7 @@ class DaemonServer:
         if not _is_int(level) or level not in (0, 10, 20, 30):
             raise RequestError("parameter 'level' must be one of 0, 10, 20, 30")
         if self.manager.set_usb_charging(level):
+            self.manager.state.set_setting("usb_charging", level)
             return _ok({"level": level})
         return self._failure("Failed to set USB charging")
 
@@ -1702,6 +1922,10 @@ class DAMXDaemon:
         exit_code = 0
         try:
             self.running = True
+            try:
+                self.manager.restore_state("start")
+            except Exception:
+                log.error(f"Restoring saved settings failed:\n{traceback.format_exc()}")
             if self.power_monitor:
                 self.power_monitor.start_monitoring()
             self.server.serve()
@@ -1721,6 +1945,11 @@ class DAMXDaemon:
             self.server.stop()
         if self.power_monitor:
             self.power_monitor.stop_monitoring()
+        if self.manager:
+            try:
+                self.manager.shutdown_fans()  # engine active -> "0,0" (firmware auto)
+            except Exception:
+                log.error(f"Stopping the fan curve engine failed:\n{traceback.format_exc()}")
         if self._wrote_pid:
             try:
                 os.unlink(PID_FILE)

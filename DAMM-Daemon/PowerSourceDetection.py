@@ -30,6 +30,38 @@ _UPOWER_ONLINE_RE = re.compile(r"^\s*online:\s+(yes|no)\b", re.MULTILINE)
 _UPOWER_ON_BATTERY_RE = re.compile(r"^\s*on-battery:\s+(yes|no)\b", re.MULTILINE)
 
 
+def read_external_power() -> Optional[bool]:
+    """Read /sys/class/power_supply/*/online for Mains/USB supplies.
+
+    True if any external supply is online, False if supplies exist but none is
+    online, None if no external supply is exposed.
+    """
+    base = "/sys/class/power_supply"
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    found = False
+    for name in names:
+        supply = os.path.join(base, name)
+        try:
+            with open(os.path.join(supply, "type"), "r") as f:
+                supply_type = f.read().strip()
+        except OSError:
+            supply_type = "Mains" if LEGACY_AC_NAMES.match(name) else ""
+        if supply_type not in EXTERNAL_SUPPLY_TYPES:
+            continue
+        try:
+            with open(os.path.join(supply, "online"), "r") as f:
+                online = f.read().strip()
+        except OSError:
+            continue
+        found = True
+        if online == "1":
+            return True
+    return False if found else None
+
+
 class PowerSourceDetector:
     """Detects power source changes and manages automatic profile switching.
 
@@ -119,8 +151,19 @@ class PowerSourceDetector:
                      self.resume_grace_seconds)
             self._grace_until = now + self.resume_grace_seconds
             self._reset_candidate()
+            self._notify_resume()
             return True
         return False
+
+    def _notify_resume(self):
+        """Firmware resets fans/profiles on resume: let the manager restore state."""
+        restore = getattr(self.manager, "restore_state", None)
+        if not callable(restore):
+            return
+        try:
+            restore("resume")
+        except Exception:
+            log.exception("Restoring settings after resume failed")
 
     def _reset_candidate(self):
         self._candidate = None
@@ -148,7 +191,7 @@ class PowerSourceDetector:
             # First observation at startup: accept immediately.
             self.current_source = state
             self._reset_candidate()
-            self._safe_handle(state)
+            self._safe_handle(state, initial=True)
             return
 
         if state == self.current_source:
@@ -176,39 +219,28 @@ class PowerSourceDetector:
             if not self._stop_event.is_set():
                 self._safe_handle(state)
 
-    def _safe_handle(self, state: bool):
+    def _safe_handle(self, state: bool, initial: bool = False):
+        try:
+            if self._restore_saved(state, initial):
+                return  # a saved per-source profile takes precedence
+        except Exception:
+            log.exception("Restoring saved settings for the power source failed")
         try:
             self._handle_power_change(state)
         except Exception:
             log.exception("Error handling power source change")
 
+    def _restore_saved(self, state: bool, initial: bool) -> bool:
+        restore = getattr(self.manager, "restore_power_source", None)
+        if not callable(restore):
+            return False
+        log.info("Power source is %s", "AC" if state else "battery")
+        return bool(restore(state, "initial" if initial else "change"))
+
     # ------------------------------------------------------------ detection
     def _check_sysfs(self) -> Optional[bool]:
         """Read /sys/class/power_supply/*/online for Mains/USB supplies."""
-        base = "/sys/class/power_supply"
-        try:
-            names = sorted(os.listdir(base))
-        except OSError:
-            return None
-        found = False
-        for name in names:
-            supply = os.path.join(base, name)
-            try:
-                with open(os.path.join(supply, "type"), "r") as f:
-                    supply_type = f.read().strip()
-            except OSError:
-                supply_type = "Mains" if LEGACY_AC_NAMES.match(name) else ""
-            if supply_type not in EXTERNAL_SUPPLY_TYPES:
-                continue
-            try:
-                with open(os.path.join(supply, "online"), "r") as f:
-                    online = f.read().strip()
-            except OSError:
-                continue
-            found = True
-            if online == "1":
-                return True
-        return False if found else None
+        return read_external_power()
 
     def _is_ac_connected(self) -> Optional[bool]:
         """True on AC, False on battery, None if unknown."""

@@ -91,6 +91,8 @@ def fake_time_module():
 
 
 # Import order matters: the daemon does `from PowerSourceDetection import ...`
+fc_mod = _load("FanCurve", "FanCurve.py")
+pers_mod = _load("Persistence", "Persistence.py")
 psd_mod = _load("PowerSourceDetection", "PowerSourceDetection.py")
 _orig_geteuid = os.geteuid
 os.geteuid = lambda: 0  # module-level root check
@@ -182,11 +184,22 @@ def kbm():
 
 
 @pytest.fixture
+def fc():
+    return fc_mod
+
+
+@pytest.fixture
+def pers():
+    return pers_mod
+
+
+@pytest.fixture
 def fake_sp(monkeypatch):
     fs = FakeSubprocess()
     monkeypatch.setattr(daemon_mod, "subprocess", fs)
     monkeypatch.setattr(psd_mod, "subprocess", fs)
     monkeypatch.setattr(kbm_mod, "subprocess", fs)
+    monkeypatch.setattr(fc_mod, "subprocess", fs)
     return fs
 
 
@@ -201,6 +214,7 @@ def root(tmp_path, monkeypatch, fake_sp):
     monkeypatch.setattr(daemon_mod, "PID_FILE", str(short / "var/run/DAMX-Daemon.pid"))
     monkeypatch.setattr(daemon_mod, "MODPROBE_CONFIG_PATH", str(short / "etc/modprobe.d/linuwu-sense.conf"))
     monkeypatch.setattr(daemon_mod, "RUNTIME_DIR", str(short / "run/damx"))
+    monkeypatch.setattr(daemon_mod, "STATE_PATH", str(short / "var/lib/damx/state.json"))
     monkeypatch.setattr(daemon_mod.DAMXManager, "RESTART_COUNTER_FILE", str(short / "run/damx/restart_attempts"))
     # Never touch the real systemctl path
     monkeypatch.setattr(daemon_mod, "SYSTEMCTL_PATH", "/usr/bin/systemctl")

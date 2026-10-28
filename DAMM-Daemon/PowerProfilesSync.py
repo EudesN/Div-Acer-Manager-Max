@@ -32,6 +32,7 @@ NEAREST_FALLBACK = ("balanced-performance", "balanced", "low-power")
 ECHO_WINDOW = 3.0          # ignore PropertiesChanged with the value we just set
 MIN_WRITE_INTERVAL = 1.0   # at most one ppd write per second
 POLL_INTERVAL = 5.0        # polling fallback period
+MONITOR_POLL_INTERVAL = 30.0  # safety poll while the monitor runs (its match may never fire)
 REDETECT_INTERVAL = 30.0   # look for ppd again when it is not running
 BUSCTL_TIMEOUT = 5
 MONITOR_QUICK_EXIT = 2.0   # a monitor dying sooner than this counts as "unsupported"
@@ -171,10 +172,15 @@ class PowerProfilesSync:
         self.active_profile: Optional[str] = None
         self.detected = False
         self._lock = threading.RLock()
+        self._cv = threading.Condition(self._lock)
         self._tls = threading.local()
         self._last_set: Optional[Tuple[str, float]] = None
         self._last_write = float("-inf")
         self._pending: Optional[str] = None
+        self._busy = False
+        self._writer: Optional[threading.Thread] = None
+        self._writer_stop = threading.Event()
+        self._last_poll = float("-inf")
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._proc = None
@@ -252,53 +258,76 @@ class PowerProfilesSync:
         bus = self.bus
         return self._get(bus) if bus else None
 
-    def _write(self, value: str, now: float) -> bool:
-        if now - self._last_write < MIN_WRITE_INTERVAL:
-            self._pending = value
-            return False
-        bus = self.bus
-        if bus is None:
-            return False
-        self._last_write = now
-        self._pending = None
+    def _set_property(self, bus, value: str) -> bool:
         r = self._run(["set-property", bus[0], bus[1], bus[2], "ActiveProfile", "s", value])
         if r is None or r.returncode != 0:
             log.warning(f"Could not set ppd profile to {value}: {(r.stderr or '').strip() if r else 'busctl failed'}")
             return False
-        self._last_set = (value, now)
-        self.active_profile = value
         log.info(f"Synced power-profiles-daemon to '{value}'")
         return True
 
-    def flush(self, now: Optional[float] = None):
-        """Write a rate-limited pending ppd value once the 1 s window has passed."""
-        now = self.clock() if now is None else now
-        with self._lock:
-            if self._pending is not None and now - self._last_write >= MIN_WRITE_INTERVAL:
-                value = self._pending
-                if value == self.active_profile:
-                    self._pending = None
-                else:
-                    self._write(value, now)
+    # Writes run on a small worker thread so a profile change never waits on
+    # busctl; at most one write per MIN_WRITE_INTERVAL; only the latest queued
+    # value is written (and it is dropped if the user changes ppd meanwhile).
+    def _enqueue(self, value: str):
+        with self._cv:
+            self._pending = value
+            if self._writer is None or not self._writer.is_alive():
+                self._writer_stop.clear()
+                self._writer = threading.Thread(target=self._writer_loop, name="DAMX-PPDWriter", daemon=True)
+                self._writer.start()
+            self._cv.notify_all()
+
+    def _writer_loop(self):
+        while not self._writer_stop.is_set():
+            with self._cv:
+                if self._pending is None:
+                    self._cv.wait(1.0)
+                    continue
+                remaining = self._last_write + MIN_WRITE_INTERVAL - self.clock()
+                if remaining > 0:
+                    self._cv.wait(min(remaining, 1.0))
+                    continue  # re-check: the queued value may have been dropped
+                value, self._pending = self._pending, None
+                bus = self.bus
+                if bus is None or value == self.active_profile:
+                    self._cv.notify_all()
+                    continue
+                self._busy = True
+                self._last_write = self.clock()
+                self._last_set = (value, self._last_write)  # echo guard starts before the write
+            ok = False
+            try:
+                ok = self._set_property(bus, value)
+            finally:
+                with self._cv:
+                    self._busy = False
+                    if ok:
+                        self.active_profile = value
+                    elif self._last_set and self._last_set[0] == value:
+                        self._last_set = None
+                    self._cv.notify_all()
+
+    def drain(self, timeout: float = 5.0) -> bool:
+        """Wait until queued ppd writes are done (used by tests and shutdown)."""
+        with self._cv:
+            return self._cv.wait_for(lambda: self._pending is None and not self._busy, timeout)
 
     # ------------------------------------------------------------ direction 2: DAMX -> ppd
     def on_acer_profile(self, profile: str, now: Optional[float] = None):
-        """Called after every successful platform profile change."""
+        """Called after every successful platform profile change; never blocks on busctl."""
         if getattr(self._tls, "from_ppd", False):
             return  # applied because of ppd: do not echo it back
-        now = self.clock() if now is None else now
         with self._lock:
             if not self.available or not self.enabled:
                 return
             target = self.mapping["to_ppd"].get(profile)
             if target is None:
                 return
-            if self.active_profile is None:
-                self.active_profile = self.read_active()
-            if target == self.active_profile:
+            if target == self.active_profile and not self._busy:
                 self._pending = None
                 return
-            self._write(target, now)
+        self._enqueue(target)
 
     # ------------------------------------------------------------ direction 1: ppd -> DAMX
     def resolve_acer(self, value: str, source: str) -> Optional[str]:
@@ -337,7 +366,12 @@ class PowerProfilesSync:
             previous, self.active_profile = self.active_profile, value
             if self._last_set and value == self._last_set[0] and now - self._last_set[1] < ECHO_WINDOW:
                 return  # our own write coming back
-            if value == previous or not self.enabled:
+            if value == previous:
+                return
+            if self._pending is not None:
+                log.info(f"Dropping queued ppd write '{self._pending}': ppd was changed to '{value}'")
+                self._pending = None
+            if not self.enabled:
                 return
             source = self.manager.power_source()
         log.info(f"power-profiles-daemon switched to '{value}'")
@@ -354,6 +388,7 @@ class PowerProfilesSync:
 
     # ------------------------------------------------------------ polling / monitor
     def poll(self, now: Optional[float] = None):
+        self._last_poll = self.clock() if now is None else now
         value = self.read_active()
         if value is None:
             self._poll_failures += 1
@@ -476,14 +511,16 @@ class PowerProfilesSync:
         if not self.available:
             if not self.detect():
                 return REDETECT_INTERVAL
-        self.flush(now)
         if self.monitor_supported and self._proc is None and now >= self._next_monitor:
             self._spawn_monitor(now)
         if self._proc is not None:
-            self._pump_monitor(self.poll_interval if pump_timeout is None else pump_timeout, given)
+            if now - self._last_poll >= MONITOR_POLL_INTERVAL:
+                self.poll(now)  # in case the monitor's match never fires (e.g. dbus-broker)
+            if self._proc is not None:
+                self._pump_monitor(self.poll_interval if pump_timeout is None else pump_timeout, given)
             return 0.0
         self.poll(now)
-        return min(self.poll_interval, MIN_WRITE_INTERVAL) if self._pending else self.poll_interval
+        return self.poll_interval
 
     # ------------------------------------------------------------ lifecycle
     def start(self):
@@ -507,6 +544,9 @@ class PowerProfilesSync:
 
     def stop(self, timeout: float = 5.0):
         self._stop.set()
+        self._writer_stop.set()
+        with self._cv:
+            self._cv.notify_all()
         self._kill_monitor()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():

@@ -49,6 +49,10 @@ RUNTIME_DIR = "/run/damx"
 STATE_PATH = "/var/lib/damx/state.json"
 FAN_MODES = ("auto", "max", "manual", "curve")
 PERSISTED_TOGGLES = ("battery_limiter", "backlight_timeout")
+# linuwu_sense writes fan_speed "0,0" when quiet/low-power is set; in quiet the
+# fans stay under firmware control (fan control is paused).
+QUIET_PROFILE = "quiet"
+FAN_PAUSED_ERROR = "Fan control is not available in the Quiet profile"
 
 MODULE_NAME = "linuwu_sense"
 SERVICE_NAME = "damx-daemon.service"
@@ -269,6 +273,9 @@ class DAMXManager:
         self.ppd_sync = PowerProfilesSync(self)
         self.gpu_power = GpuPowerInfo(self.state)
         self._startup_restore: Optional[Tuple[str, bool]] = None
+        self.fan_control_paused = False
+        # Last fan mode requested (by the user or a restore): {"mode", "cpu", "gpu"}.
+        self._fan_state: Optional[Dict] = None
 
         log.info(f"** Starting DAMX-Daemon v{VERSION} **")
 
@@ -284,6 +291,7 @@ class DAMXManager:
         log.info(f"Available features: {', '.join(sorted(self.available_features))}")
         if self.laptop_type == LaptopType.UNKNOWN:
             log.warning(f"Running in reduced mode: {self.status_message}")
+        self._refresh_pause_state()
 
     # ------------------------------------------------------------ errors
     @property
@@ -497,6 +505,12 @@ class DAMXManager:
         self._detect_hardware()
         log.info(f"Re-detected laptop type {self.laptop_type.name}; "
                  f"features: {', '.join(sorted(self.available_features))}")
+        self._refresh_pause_state()
+        if self.laptop_type != LaptopType.UNKNOWN:
+            try:
+                self.restore_state("reload")  # the reloaded driver starts from defaults
+            except Exception:
+                log.error(f"Restoring settings after driver reload failed:\n{traceback.format_exc()}")
         if restart_daemon:
             ok = self.restart_daemon() and ok
         return ok
@@ -840,6 +854,10 @@ class DAMXManager:
     def _after_profile_change(self, profile: str):
         """Every successful profile change (user, restore, battery logic, ppd) ends here."""
         try:
+            self._fan_after_profile_change(profile)
+        except Exception:
+            log.error(f"Re-applying the fan mode after a profile change failed:\n{traceback.format_exc()}")
+        try:
             self.ppd_sync.on_acer_profile(profile)
         except Exception:
             log.error(f"ppd sync after profile change failed:\n{traceback.format_exc()}")
@@ -924,9 +942,11 @@ class DAMXManager:
 
     def get_fan_mode(self) -> str:
         """Current fan mode: curve (engine running), else from the driver: auto, max,
-        manual, unknown; '' when fan control is unavailable."""
+        manual, unknown; '' when fan control is unavailable; auto while paused (quiet)."""
         if "fan_speed" not in self.available_features:
             return ""
+        if self.fan_control_paused:
+            return "auto"
         if self.curve_engine.active:
             return "curve"
         values = self._read_fan_values()
@@ -962,9 +982,15 @@ class DAMXManager:
             self._set_last_error("fan speeds must be integers between 0 and 100")
             log.error(f"Invalid fan speeds. Values must be integers 0-100: cpu={_short(cpu)}, gpu={_short(gpu)}")
             return False
+        if self.fan_control_paused:
+            self._set_last_error(FAN_PAUSED_ERROR)
+            return False
         with self._fan_mode_lock:
             self.curve_engine.stop()
-            return self._write_fan(cpu, gpu)
+            ok = self._write_fan(cpu, gpu)
+            if ok:
+                self._fan_state = {"mode": self.fan_mode_for_speeds(cpu, gpu), "cpu": cpu, "gpu": gpu}
+            return ok
 
     @staticmethod
     def fan_mode_for_speeds(cpu: int, gpu: int) -> str:
@@ -986,23 +1012,78 @@ class DAMXManager:
         if mode not in FAN_MODES:
             self._set_last_error(f"invalid fan mode {_short(mode)}")
             return False
+        if mode == "manual" and not (_is_int(cpu) and _is_int(gpu) and 0 <= cpu <= 100 and 0 <= gpu <= 100):
+            self._set_last_error("manual fan speeds must be integers between 1 and 100")
+            return False
         with self._fan_mode_lock:
-            if mode == "curve":
-                try:
-                    self.curve_engine.start(curve if curve is not None else self.state.curve())
-                except ValueError as e:
-                    self._set_last_error(f"invalid fan curve: {e}")
-                    return False
+            if self.fan_control_paused:
+                # Quiet profile: remember it, apply when leaving quiet.
+                self._fan_state = {"mode": mode, "cpu": cpu, "gpu": gpu}
+                log.info(f"Fan mode '{mode}' deferred: fan control is paused in the Quiet profile")
                 return True
-            if mode == "auto":
-                cpu, gpu = 0, 0
-            elif mode == "max":
-                cpu, gpu = 100, 100
-            elif not (_is_int(cpu) and _is_int(gpu) and 0 <= cpu <= 100 and 0 <= gpu <= 100):
-                self._set_last_error("manual fan speeds must be integers between 1 and 100")
+            if not self._apply_fan_locked(mode, cpu, gpu, curve):
                 return False
-            self.curve_engine.stop()
-            return self._write_fan(cpu, gpu)
+            self._fan_state = {"mode": mode, "cpu": cpu, "gpu": gpu}
+            return True
+
+    def _apply_fan_locked(self, mode: str, cpu=None, gpu=None, curve: Optional[Dict] = None,
+                          reassert: bool = False) -> bool:
+        """Apply a fan mode (caller holds _fan_mode_lock)."""
+        if mode == "curve":
+            if reassert and self.curve_engine.active:
+                self.curve_engine.request_reassert()
+                return True
+            try:
+                self.curve_engine.start(curve if curve is not None else self.state.curve())
+            except ValueError as e:
+                self._set_last_error(f"invalid fan curve: {e}")
+                return False
+            return True
+        if mode == "auto":
+            cpu, gpu = 0, 0
+        elif mode == "max":
+            cpu, gpu = 100, 100
+        self.curve_engine.stop()
+        return self._write_fan(cpu, gpu)
+
+    def _refresh_pause_state(self):
+        """Pause fan control if the current profile is quiet (e.g. at start-up)."""
+        if "fan_speed" not in self.available_features:
+            self.fan_control_paused = False
+            return
+        if self.get_thermal_profile() == QUIET_PROFILE:
+            with self._fan_mode_lock:
+                self.fan_control_paused = True
+                self.curve_engine.stop()
+
+    def _fan_after_profile_change(self, profile: str):
+        """quiet -> pause fan control (firmware auto); otherwise re-apply the fan mode,
+        because the driver resets fan_speed to "0,0" on quiet/low-power."""
+        if "fan_speed" not in self.available_features:
+            return
+        with self._fan_mode_lock:
+            if profile == QUIET_PROFILE:
+                if not self.fan_control_paused:
+                    log.info("Quiet profile: fan control paused (fans under firmware control)")
+                self.fan_control_paused = True
+                self.curve_engine.stop()  # the driver already wrote "0,0"
+                return
+            was_paused, self.fan_control_paused = self.fan_control_paused, False
+            st = self._fan_state
+            if st is None and self.state.restore_on_start:
+                entry = self.state.source(self.power_source())
+                if entry.get("fan_mode"):
+                    manual = entry.get("fan_manual") or [None, None]
+                    st = {"mode": entry["fan_mode"], "cpu": manual[0], "gpu": manual[1]}
+            if st is None or (st["mode"] == "auto" and not was_paused):
+                return
+            if st["mode"] == "manual" and not (_is_int(st["cpu"]) and _is_int(st["gpu"])):
+                return
+            if self._apply_fan_locked(st["mode"], st["cpu"], st["gpu"], reassert=True):
+                log.info(f"Re-applied fan mode '{st['mode']}' after switching to '{profile}'"
+                         + (" (fan control resumed)" if was_paused else ""))
+            else:
+                log.warning(f"Could not re-apply fan mode '{st['mode']}': {self.last_error}")
 
     def shutdown_fans(self):
         """On daemon shutdown: stop the engine and hand the fans back to firmware."""
@@ -1214,6 +1295,7 @@ class DAMXManager:
             settings["fan_mode"] = self.get_fan_mode()
 
         settings["fan_curve_active"] = self.curve_engine.active
+        settings["fan_control_paused"] = self.fan_control_paused
         settings["restore_on_start"] = self.state.restore_on_start
         settings["power_source"] = self.power_source()
         settings["ppd_sync"] = {"available": self.ppd_sync.available, "enabled": self.ppd_sync.enabled,
@@ -1708,6 +1790,8 @@ class DaemonServer:
         self._require_feature("fan_speed", "Fan speed control")
         cpu = _int_param(params, "cpu", 0, 100)
         gpu = _int_param(params, "gpu", 0, 100)
+        if self.manager.fan_control_paused:
+            return _err(FAN_PAUSED_ERROR)
         mode = self.manager.fan_mode_for_speeds(cpu, gpu)
         if self.manager.set_fan_speed(cpu, gpu):
             self.manager.persist_fan_mode(mode, cpu, gpu)
@@ -1723,6 +1807,8 @@ class DaemonServer:
         if mode == "manual":
             cpu = _int_param(params, "cpu", 1, 100)
             gpu = _int_param(params, "gpu", 1, 100)
+        if self.manager.fan_control_paused:
+            return _err(FAN_PAUSED_ERROR)
         if not self.manager.set_fan_mode(mode, cpu, gpu):
             return self._failure(f"Failed to set fan mode {mode}")
         self.manager.persist_fan_mode(mode, cpu, gpu)
@@ -1743,6 +1829,8 @@ class DaemonServer:
             activate = _bool_param(params, "activate")
         if activate:
             self._require_feature("fan_speed", "Fan speed control")
+            if self.manager.fan_control_paused:
+                return _err(FAN_PAUSED_ERROR)
         self.manager.state.set_curve(curve)
         if activate or self.manager.curve_engine.active:
             if not self.manager.set_fan_mode("curve", curve=curve):
@@ -1769,11 +1857,14 @@ class DaemonServer:
         return _ok(self.manager.gpu_power.info())
 
     def _cmd_set_nvidia_powerd(self, params, post):
+        """Reply at once; `systemctl enable|disable --now` runs in the background."""
         enabled = _bool_param(params, "enabled")
-        ok, error = self.manager.gpu_power.set_powerd(enabled)
-        if not ok:
-            return _err(error)
-        return _ok({"powerd": self.manager.gpu_power.powerd_status(force=True)})
+        gpu = self.manager.gpu_power
+        status = gpu.powerd_status(timeout=2)
+        if gpu.status_reliable and not status["installed"]:
+            return _err("nvidia-powerd.service is not installed")
+        post.append(lambda: gpu.set_powerd_async(enabled))
+        return _ok({"scheduled": True, "powerd": status})
 
     def _cmd_get_ppd_sync(self, params, post):
         sync = self.manager.ppd_sync

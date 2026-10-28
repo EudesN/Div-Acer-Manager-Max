@@ -46,6 +46,7 @@ def make_engine(fc, sensors=None, c=None):
         return True
     eng = fc.CurveEngine(write, sensors or FakeSensors())
     eng.curve = fc.validate_curve(c or curve())
+    eng.gpu_read_interval = 0  # logic tests read the GPU every step; throttling tested separately
     return eng, writes
 
 

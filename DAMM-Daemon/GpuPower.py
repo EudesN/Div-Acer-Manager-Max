@@ -59,6 +59,8 @@ class GpuPowerInfo:
         self.max_limit_w: Optional[float] = limits.get("max_limit_w")
         self._limits_tried = float("-inf")
         self._powerd_cache: Optional[Tuple[float, Dict]] = None
+        self.status_reliable = False   # False if systemctl could not be queried
+        self._change_lock = threading.Lock()
 
     # ------------------------------------------------------------ powerd
     def _systemctl_run(self, args, timeout):
@@ -69,13 +71,14 @@ class GpuPowerInfo:
             log.debug(f"systemctl {' '.join(args)} failed: {e}")
             return None
 
-    def powerd_status(self, force: bool = False) -> Dict:
+    def powerd_status(self, force: bool = False, timeout: float = SYSTEMCTL_QUERY_TIMEOUT) -> Dict:
         now = self.clock()
         with self._lock:
             if not force and self._powerd_cache and now - self._powerd_cache[0] < POWERD_CACHE_SECONDS:
                 return dict(self._powerd_cache[1])
-        enabled_r = self._systemctl_run(["is-enabled", POWERD_UNIT], SYSTEMCTL_QUERY_TIMEOUT)
-        active_r = self._systemctl_run(["is-active", POWERD_UNIT], SYSTEMCTL_QUERY_TIMEOUT)
+        enabled_r = self._systemctl_run(["is-enabled", POWERD_UNIT], timeout)
+        active_r = self._systemctl_run(["is-active", POWERD_UNIT], timeout)
+        self.status_reliable = enabled_r is not None and active_r is not None
         enabled_state = (enabled_r.stdout or "").strip().splitlines()[0] if enabled_r and enabled_r.stdout else ""
         active_state = (active_r.stdout or "").strip().splitlines()[0] if active_r and active_r.stdout else ""
         installed = (enabled_state in UNIT_FILE_STATES
@@ -88,15 +91,26 @@ class GpuPowerInfo:
         return dict(status)
 
     def set_powerd(self, enabled: bool) -> Tuple[bool, Optional[str]]:
-        if not self.powerd_status(force=True)["installed"]:
-            return False, f"{POWERD_UNIT} is not installed"
+        """`systemctl enable|disable --now nvidia-powerd.service` (10 s timeout)."""
         args = ["enable" if enabled else "disable", "--now", POWERD_UNIT]
-        r = self._systemctl_run(args, SYSTEMCTL_CHANGE_TIMEOUT)
-        if r is None or r.returncode != 0:
-            detail = (r.stderr or r.stdout or "").strip() if r else "systemctl did not finish"
-            return False, f"systemctl {' '.join(args)} failed: {detail}"
-        log.info(f"{'Enabled' if enabled else 'Disabled'} {POWERD_UNIT}")
-        return True, None
+        with self._change_lock:
+            r = self._systemctl_run(args, SYSTEMCTL_CHANGE_TIMEOUT)
+            if r is None or r.returncode != 0:
+                detail = (r.stderr or r.stdout or "").strip() if r else "systemctl did not finish"
+                error = f"systemctl {' '.join(args)} failed: {detail}"
+                log.error(error)
+                ok = False
+            else:
+                log.info(f"{'Enabled' if enabled else 'Disabled'} {POWERD_UNIT}")
+                ok, error = True, None
+            self.powerd_status(force=True)  # refresh the cache for get_gpu_power_info
+            return ok, error
+
+    def set_powerd_async(self, enabled: bool) -> threading.Thread:
+        """Run set_powerd in the background (the command replies immediately)."""
+        t = threading.Thread(target=self.set_powerd, args=(enabled,), name="DAMX-Powerd", daemon=True)
+        t.start()
+        return t
 
     # ------------------------------------------------------------ limits
     def _gpu_status(self) -> Optional[str]:
@@ -139,7 +153,7 @@ class GpuPowerInfo:
         self._maybe_read_limits(status)
         return {
             "nvidia_present": present,
-            "gpu_asleep": status == "suspended",
+            "gpu_asleep": status in ("suspended", "suspending"),
             "powerd": self.powerd_status(),
             "default_limit_w": self.default_limit_w,
             "max_limit_w": self.max_limit_w,

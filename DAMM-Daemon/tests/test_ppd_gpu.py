@@ -249,30 +249,79 @@ def test_direction2_user_change_syncs_ppd(root, damx, sysfake):
     m = manager(root, damx)
     m.ppd_sync.detect()
     srv = damx.DaemonServer(m)
-    m.ppd_sync.clock = lambda: 100.0
     assert srv.process_command("set_thermal_profile", {"profile": "low-power"})["success"]
+    assert m.ppd_sync.drain()
     sets = sysfake.busctl("set-property")
     assert sets == [["/usr/bin/busctl" if sets and sets[0][0] == "/usr/bin/busctl" else sets[0][0],
                      "--system", "set-property", NEW, "/org/freedesktop/UPower/PowerProfiles", NEW,
                      "ActiveProfile", "s", "power-saver"]]
     assert sysfake.active == "power-saver"
     # same ppd value -> no write
-    m.ppd_sync.clock = lambda: 105.0
     assert m.set_thermal_profile("low-power")
+    assert m.ppd_sync.drain()
     assert len(sysfake.busctl("set-property")) == 1
+    m.ppd_sync.stop()
 
 
-def test_direction2_rate_limited(root, damx, sysfake):
+def test_direction2_rate_limited(root, damx, sysfake, monkeypatch):
+    """At most one ppd write per second; only the latest queued value is written."""
+    import time as _t
+    stamps = []
+    real_run = sysfake.run
+
+    def run(cmd, **kw):
+        if "set-property" in cmd:
+            stamps.append(_t.monotonic())
+        return real_run(cmd, **kw)
+    monkeypatch.setattr(sysfake, "run", run)
     m = manager(root, damx)
     s = m.ppd_sync
     s.detect()
-    s.on_acer_profile("low-power", now=10.0)
-    s.on_acer_profile("balanced-performance", now=10.4)       # within 1 s -> pending
-    assert len(sysfake.busctl("set-property")) == 1
-    s.flush(now=10.9)
-    assert len(sysfake.busctl("set-property")) == 1
-    s.flush(now=11.0)
-    assert len(sysfake.busctl("set-property")) == 2 and sysfake.active == "performance"
+    s.on_acer_profile("low-power")
+    assert s.drain()
+    s.on_acer_profile("balanced-performance")   # within 1 s -> queued
+    s.on_acer_profile("balanced")               # replaces the queued value
+    assert s.drain(5)
+    assert [c[-1] for c in sysfake.busctl("set-property")] == ["power-saver", "balanced"]
+    assert stamps[1] - stamps[0] >= 0.99
+    s.stop()
+
+
+def test_set_property_does_not_block_profile_change(root, damx, sysfake, monkeypatch):
+    import threading
+    import time as _t
+    gate = threading.Event()
+    real_run = sysfake.run
+
+    def slow(cmd, **kw):
+        if "set-property" in cmd:
+            gate.wait(5)
+        return real_run(cmd, **kw)
+    monkeypatch.setattr(sysfake, "run", slow)
+    m = manager(root, damx)
+    m.ppd_sync.detect()
+    t0 = _t.monotonic()
+    assert m.set_thermal_profile("low-power")
+    assert _t.monotonic() - t0 < 0.5, "profile change waited for busctl"
+    gate.set()
+    assert m.ppd_sync.drain()
+    assert sysfake.active == "power-saver"
+    m.ppd_sync.stop()
+
+
+def test_user_ppd_change_drops_queued_write(root, damx, sysfake):
+    m = manager(root, damx)
+    s = m.ppd_sync
+    s.detect()
+    s.on_acer_profile("low-power")              # written now
+    assert s.drain()
+    s.on_acer_profile("balanced-performance")   # queued (rate limit)
+    assert s._pending == "performance"
+    s.on_ppd_profile("balanced", now=s.clock() + 0.1)   # user changed ppd meanwhile
+    assert s._pending is None
+    assert s.drain(3)
+    assert [c[-1] for c in sysfake.busctl("set-property")] == ["power-saver"]
+    s.stop()
 
 
 def test_direction2_disabled(root, damx, sysfake):
@@ -294,6 +343,7 @@ def test_direction2_from_restore_and_battery_logic(root, damx, psd, pers, sysfak
     m.ppd_sync._last_write = float("-inf")
     m.state.update_source("battery", thermal_profile="low-power")
     m.restore_state("resume")
+    assert m.ppd_sync.drain()
     assert profile(root) == "low-power" and sysfake.active == "power-saver"
 
 
@@ -332,8 +382,10 @@ def test_direction1_nearest_available(root, damx, sysfake, choices, expected):
 def test_loop_guard_ignores_own_echo(root, damx, sysfake):
     m = manager(root, damx)
     s = m.ppd_sync
+    s.clock = lambda: 100.0
     s.detect()
-    s.on_acer_profile("low-power", now=100)        # we set ppd power-saver
+    s.on_acer_profile("low-power")                 # we set ppd power-saver
+    assert s.drain()
     assert sysfake.active == "power-saver"
     s.active_profile = "balanced"                  # pretend the signal raced our cached value
     s.on_ppd_profile("power-saver", now=101)       # echo within 3 s -> ignored
@@ -345,8 +397,10 @@ def test_loop_guard_ignores_own_echo(root, damx, sysfake):
 def test_loop_guard_window_expires(root, damx, sysfake):
     m = manager(root, damx)
     s = m.ppd_sync
+    s.clock = lambda: 100.0
     s.detect()
-    s.on_acer_profile("low-power", now=100)
+    s.on_acer_profile("low-power")
+    assert s.drain()
     s.active_profile = "balanced"
     s.on_ppd_profile("power-saver", now=103.5)     # after the 3 s window -> applied
     assert profile(root) == "balanced-performance"  # quiet not offered -> nearest
@@ -392,6 +446,7 @@ def test_power_change_saved_profile_wins_then_syncs_ppd(root, damx, psd, sysfake
     d.check_power_source(now=0)
     _unplug(root, d)
     assert profile(root) == "balanced"
+    assert m.ppd_sync.drain()
     assert sysfake.active == "balanced"   # direction 2 after the restore
 
 
@@ -577,7 +632,7 @@ def test_gpu_asleep_never_runs_nvidia_smi(root, damx, sysfake, with_smi, status)
     _nvidia(root, status)
     for _ in range(3):
         d = m.gpu_power.info()
-    assert d["gpu_asleep"] is (status == "suspended") and d["nvidia_present"] is True
+    assert d["gpu_asleep"] is True and d["nvidia_present"] is True
     assert d["default_limit_w"] is None and d["dynamic_boost_supported"] is None
     assert sysfake.named("nvidia-smi") == []
 
@@ -623,20 +678,50 @@ def test_powerd_status_cached(root, damx, sysfake):
     assert len(sysfake.named("systemctl")) == 2
 
 
-def test_set_nvidia_powerd(root, damx, sysfake):
+def _powerd_changes(sysfake):
+    return [(c, kw) for c, kw in sysfake.named("systemctl") if "--now" in c]
+
+
+def test_set_nvidia_powerd_replies_then_changes(root, damx, sysfake, monkeypatch):
+    import threading
+    import time as _t
+    from conftest import wait_for
     m = manager(root, damx)
     srv = damx.DaemonServer(m)
+    gate = threading.Event()
+    real_run = sysfake.run
+
+    def slow(cmd, **kw):
+        if "--now" in cmd:
+            gate.wait(5)
+        return real_run(cmd, **kw)
+    monkeypatch.setattr(sysfake, "run", slow)
+    t0 = _t.monotonic()
     r = srv.process_command("set_nvidia_powerd", {"enabled": False})
-    assert r["success"] and set(r["data"]["powerd"]) == {"installed", "enabled", "active"}
-    change = [(c, kw) for c, kw in sysfake.named("systemctl") if "--now" in c]
-    assert change[0][0][0].startswith("/") and change[0][0][1:] == ["disable", "--now", "nvidia-powerd.service"]
-    assert change[0][1]["timeout"] == 10
-    srv.process_command("set_nvidia_powerd", {"enabled": True})
-    assert [c for c, _ in sysfake.named("systemctl") if "--now" in c][-1][1] == "enable"
+    assert _t.monotonic() - t0 < 1.0, "reply waited for systemctl"
+    assert r == {"success": True, "data": {"scheduled": True,
+                                           "powerd": {"installed": True, "enabled": True, "active": True}}}
+    gate.set()
+    assert wait_for(lambda: _powerd_changes(sysfake))
+    cmd, kw = _powerd_changes(sysfake)[0]
+    assert cmd[0].startswith("/") and cmd[1:] == ["disable", "--now", "nvidia-powerd.service"]
+    assert kw["timeout"] == 10
+    # status queries for the reply use a short timeout (reply worst case < 4.5 s)
+    queries = [kw for c, kw in sysfake.named("systemctl") if c[1] in ("is-enabled", "is-active")]
+    assert queries[0]["timeout"] == 2
+
+
+def test_set_nvidia_powerd_errors(root, damx, sysfake):
+    from conftest import wait_for
+    m = manager(root, damx)
+    srv = damx.DaemonServer(m)
     assert srv.process_command("set_nvidia_powerd", {})["error"] == "missing required parameter 'enabled'"
     sysfake.systemctl_rc = 1
-    r = srv.process_command("set_nvidia_powerd", {"enabled": True})
-    assert r["success"] is False and "Access denied" in r["error"]
+    assert srv.process_command("set_nvidia_powerd", {"enabled": True})["success"] is True  # scheduled
+    assert wait_for(lambda: _powerd_changes(sysfake))
+    assert m.gpu_power.set_powerd(True) == (False, "systemctl enable --now nvidia-powerd.service failed: "
+                                                   "Access denied")
+    m.gpu_power._powerd_cache = None
     sysfake.unit = {"is-enabled": ("", 1), "is-active": ("inactive", 3)}
     r = srv.process_command("set_nvidia_powerd", {"enabled": True})
     assert r == {"success": False, "error": "nvidia-powerd.service is not installed"}
@@ -650,8 +735,8 @@ def test_set_nvidia_powerd_requires_privilege(root, damx, sysfake):
     assert r == {"success": False, "error": damx.PERMISSION_DENIED_ERROR}
     assert sysfake.named("systemctl") == []
     assert srv.process_command("get_gpu_power_info", {}, peer=peer)["success"]
-    assert srv.process_command("set_nvidia_powerd", {"enabled": False},
-                               peer=damx.PeerInfo(1, 0, 0, True))["success"]
+    r = srv.process_command("set_nvidia_powerd", {"enabled": False}, peer=damx.PeerInfo(1, 0, 0, True))
+    assert r["success"] and r["data"]["scheduled"] is True
 
 
 def test_daemon_lifecycle_stops_ppd_monitor(root, damx, sysfake, monkeypatch):

@@ -30,6 +30,8 @@ FAILSAFE_READS = 3        # consecutive failed temperature reads -> "0,0"
 NVIDIA_VENDOR = "0x10de"
 NVIDIA_SMI_ARGS = ["--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"]
 NVIDIA_SMI_TIMEOUT = 2
+GPU_READ_INTERVAL = 10.0  # query the dGPU at most this often so it can runtime-suspend
+ASLEEP_STATES = ("suspended", "suspending")
 
 
 def _preset(cpu, gpu):
@@ -206,7 +208,7 @@ class TempSensors:
         status = self.gpu_runtime_status()
         if status is None:
             return None, False
-        if status == "suspended":
+        if status in ASLEEP_STATES:
             return None, True
         smi = shutil.which("nvidia-smi")
         if not smi:
@@ -248,6 +250,8 @@ class CurveEngine:
         self._last_write_time = 0.0
         self._force_write = False
         self.last = self._empty_last()
+        self.gpu_read_interval = GPU_READ_INTERVAL
+        self._gpu_cache: Optional[Tuple[float, Optional[float], bool]] = None  # (time, temp, asleep)
 
     @staticmethod
     def _empty_last() -> Dict:
@@ -266,6 +270,7 @@ class CurveEngine:
         self._last_written = None
         self._last_write_time = 0.0
         self._force_write = False
+        self._gpu_cache = None
 
     def start(self, curve: Dict):
         """Start (or, if running, update the curve of and re-assert) the engine."""
@@ -315,7 +320,7 @@ class CurveEngine:
         if stop_event is None:
             stop_event = self._stop if self.active else threading.Event()
         try:
-            target = self._compute()
+            target = self._compute(now)
         except Exception:
             log.exception("Fan curve engine error; falling back to firmware auto")
             self._failures = max(self._failures, FAILSAFE_READS)
@@ -333,7 +338,15 @@ class CurveEngine:
                 return
         self._maybe_write(target, now, stop_event)
 
-    def _compute(self) -> Optional[Tuple[int, int]]:
+    def _gpu_reading(self, now: float) -> Tuple[Optional[float], bool]:
+        """GPU temperature, read at most every gpu_read_interval seconds (cached between)."""
+        cache = self._gpu_cache
+        if cache is None or now - cache[0] >= self.gpu_read_interval or now < cache[0]:
+            temp, asleep = self.sensors.gpu_temp()
+            self._gpu_cache = cache = (now, temp, asleep)
+        return cache[1], cache[2]
+
+    def _compute(self, now: float = 0.0) -> Optional[Tuple[int, int]]:
         curve = self.curve
         cpu_temp = self.sensors.cpu_temp()
         if cpu_temp is None:
@@ -346,7 +359,7 @@ class CurveEngine:
         self._failures = 0
         self._failsafe = False
 
-        gpu_temp, asleep = self.sensors.gpu_temp()
+        gpu_temp, asleep = self._gpu_reading(now)
         cpu_pct = self._cpu.update(curve["cpu"], cpu_temp, curve["hysteresis"])
         if gpu_temp is None:
             # dGPU asleep (or no readable dGPU): follow the CPU curve, never wake it.
